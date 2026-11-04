@@ -88,6 +88,7 @@ export default function CustomerHomeScreen() {
 
   const selectDestination = async (place: Place) => {
     setDestination(place);
+    setActiveRoute(null);
     setQuery('');
     setStep('confirm');
 
@@ -147,9 +148,26 @@ export default function CustomerHomeScreen() {
       <AppMap
         initialCenter={pickup}
         cameraRef={cameraRef}
+        onPress={
+          step === 'choose' || step === 'confirm'
+            ? (c) =>
+                selectDestination({
+                  id: 'pin',
+                  name: 'Điểm đã chọn trên bản đồ',
+                  address: `${c[1].toFixed(5)}, ${c[0].toFixed(5)}`,
+                  coord: c,
+                })
+            : undefined
+        }
         onLongPress={
           step === 'choose' || step === 'confirm'
-            ? (c) => selectDestination({ id: 'pin', name: 'Điểm đã chọn trên bản đồ', address: `${c[1].toFixed(5)}, ${c[0].toFixed(5)}`, coord: c })
+            ? (c) =>
+                selectDestination({
+                  id: 'pin',
+                  name: 'Điểm đã chọn trên bản đồ',
+                  address: `${c[1].toFixed(5)}, ${c[0].toFixed(5)}`,
+                  coord: c,
+                })
             : undefined
         }>
         {destination && (

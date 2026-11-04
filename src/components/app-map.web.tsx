@@ -26,16 +26,22 @@ const MapContext = createContext<maplibregl.Map | null>(null);
 type AppMapProps = {
   initialCenter: LngLat;
   cameraRef?: Ref<CameraRef>;
+  onPress?: (coord: LngLat) => void;
   onLongPress?: (coord: LngLat) => void;
   children?: ReactNode;
 };
 
 /** Full-screen MapLibre map on Web using MapLibre GL JS and OpenFreeMap style. */
-export function AppMap({ initialCenter, cameraRef, onLongPress, children }: AppMapProps) {
+export function AppMap({ initialCenter, cameraRef, onPress, onLongPress, children }: AppMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const [activeMap, setActiveMap] = useState<maplibregl.Map | null>(null);
+  const onPressRef = useRef(onPress);
   const onLongPressRef = useRef(onLongPress);
+
+  useEffect(() => {
+    onPressRef.current = onPress;
+  }, [onPress]);
 
   useEffect(() => {
     onLongPressRef.current = onLongPress;
@@ -94,10 +100,21 @@ export function AppMap({ initialCenter, cameraRef, onLongPress, children }: AppM
       map.resize();
     });
 
+    // Support single click to pick coordinates directly
+    map.on('click', (e: maplibregl.MapMouseEvent) => {
+      const coord: LngLat = [e.lngLat.lng, e.lngLat.lat];
+      if (onPressRef.current) {
+        onPressRef.current(coord);
+      } else if (onLongPressRef.current) {
+        onLongPressRef.current(coord);
+      }
+    });
+
     // Support right-click / contextmenu as instant coordinate selection
     map.on('contextmenu', (e: maplibregl.MapMouseEvent) => {
       e.preventDefault();
-      onLongPressRef.current?.([e.lngLat.lng, e.lngLat.lat]);
+      const coord: LngLat = [e.lngLat.lng, e.lngLat.lat];
+      (onPressRef.current || onLongPressRef.current)?.(coord);
     });
 
     // Support long press on desktop/touch (holding mouse/touch for 500ms)

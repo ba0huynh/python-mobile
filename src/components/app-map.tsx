@@ -20,18 +20,20 @@ export type { CameraRef };
 type AppMapProps = {
   initialCenter: LngLat;
   cameraRef?: Ref<CameraRef>;
+  onPress?: (coord: LngLat) => void;
   onLongPress?: (coord: LngLat) => void;
   children?: ReactNode;
 };
 
 /** Full-screen MapLibre map using the OpenFreeMap style from map.json. */
-export function AppMap({ initialCenter, cameraRef, onLongPress, children }: AppMapProps) {
+export function AppMap({ initialCenter, cameraRef, onPress, onLongPress, children }: AppMapProps) {
   return (
     <Map
       style={StyleSheet.absoluteFill}
       mapStyle={mapStyle as unknown as StyleSpecification}
       logo={false}
       compass={false}
+      onPress={onPress ? (e) => onPress(e.nativeEvent.lngLat) : undefined}
       onLongPress={onLongPress ? (e) => onLongPress(e.nativeEvent.lngLat) : undefined}>
       <Camera ref={cameraRef} initialViewState={{ center: initialCenter, zoom: 15 }} />
       {children}
