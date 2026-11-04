@@ -1,6 +1,6 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useEffect, useRef, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { AppMap, MapPin, RouteLine, type CameraRef } from '@/components/app-map';
@@ -44,6 +44,8 @@ export default function CustomerHomeScreen() {
   const [query, setQuery] = useState('');
   const [liveDriverCoord, setLiveDriverCoord] = useState<LngLat | null>(null);
   const [isModalVisible, setIsModalVisible] = useState(false);
+  const [routeDrawn, setRouteDrawn] = useState(false);
+  const [loadingRoute, setLoadingRoute] = useState(false);
 
   useEffect(() => {
     const unsubLocation = addListener('driver.location', (data: { lat?: number; lng?: number }) => {
@@ -87,34 +89,45 @@ export default function CustomerHomeScreen() {
     }
   }, [step]);
 
-  const selectDestination = async (place: Place) => {
+  const handlePickDestination = (place: Place) => {
     setDestination(place);
     setActiveRoute(null);
+    setRouteDrawn(false);
+    setIsModalVisible(false);
     setQuery('');
     setStep('confirm');
-    setIsModalVisible(false);
+
+    cameraRef.current?.flyTo({ center: place.coord, zoom: 15, duration: 600 });
+  };
+
+  const handleConfirmRoute = async () => {
+    if (!destination) return;
+    setLoadingRoute(true);
 
     let activePickup = pickup;
-    if (place.id === 'geoapify-route') {
+    if (destination.id === 'geoapify-route') {
       activePickup = [106.6846006495482, 10.758240352495491];
       setCustomPickup(activePickup);
       setActiveRoute(GEOAPIFY_ROUTE);
+      setRouteDrawn(true);
+      setLoadingRoute(false);
       cameraRef.current?.fitBounds(
         boundsOfCoords(GEOAPIFY_ROUTE.geometry.coordinates as LngLat[]),
         { padding: SHEET_PADDING, duration: 800 }
       );
-    } else {
-      cameraRef.current?.fitBounds(boundsOf(activePickup, place.coord), {
-        padding: SHEET_PADDING,
-        duration: 800,
-      });
+      return;
     }
+
+    cameraRef.current?.fitBounds(boundsOf(activePickup, destination.coord), {
+      padding: SHEET_PADDING,
+      duration: 800,
+    });
 
     try {
       const res = await api.rides.estimate(
         {
           pickup: { lat: activePickup[1], lng: activePickup[0] },
-          dropoff: { lat: place.coord[1], lng: place.coord[0] },
+          dropoff: { lat: destination.coord[1], lng: destination.coord[0] },
         },
         customerToken ?? undefined
       );
@@ -129,13 +142,18 @@ export default function CustomerHomeScreen() {
         }
       }
     } catch {
-      // Keep existing route or fallback
+      // Straight line fallback
+    } finally {
+      setRouteDrawn(true);
+      setLoadingRoute(false);
     }
   };
 
   const reset = () => {
     setDestination(null);
     setActiveRoute(null);
+    setRouteDrawn(false);
+    setLoadingRoute(false);
     setCustomPickup(null);
     setLiveDriverCoord(null);
     setIsModalVisible(false);
@@ -154,7 +172,7 @@ export default function CustomerHomeScreen() {
         onPress={
           step === 'choose' || step === 'confirm'
             ? (c) =>
-                selectDestination({
+                handlePickDestination({
                   id: 'pin',
                   name: 'Điểm đã chọn trên bản đồ',
                   address: `${c[1].toFixed(5)}, ${c[0].toFixed(5)}`,
@@ -165,7 +183,7 @@ export default function CustomerHomeScreen() {
         onLongPress={
           step === 'choose' || step === 'confirm'
             ? (c) =>
-                selectDestination({
+                handlePickDestination({
                   id: 'pin',
                   name: 'Điểm đã chọn trên bản đồ',
                   address: `${c[1].toFixed(5)}, ${c[0].toFixed(5)}`,
@@ -173,7 +191,7 @@ export default function CustomerHomeScreen() {
                 })
             : undefined
         }>
-        {destination && (
+        {destination && routeDrawn && (
           <RouteLine
             geometry={activeRoute?.geometry}
             from={pickup}
@@ -199,32 +217,60 @@ export default function CustomerHomeScreen() {
       {(step === 'choose' || step === 'confirm') && !isModalVisible && (
         <View style={styles.fabContainer} pointerEvents="box-none">
           <Pressable
+            disabled={loadingRoute}
             style={[styles.confirmFab, !destination && styles.confirmFabEmpty]}
-            onPress={() => setIsModalVisible(true)}>
-            <Ionicons
-              name={destination ? 'car-sport' : 'search'}
-              size={20}
-              color={destination ? '#fff' : Colors.text}
-            />
+            onPress={() => {
+              if (!destination) {
+                setIsModalVisible(true);
+              } else if (!routeDrawn) {
+                handleConfirmRoute();
+              } else {
+                setIsModalVisible(true);
+              }
+            }}>
+            {loadingRoute ? (
+              <ActivityIndicator size="small" color="#fff" />
+            ) : (
+              <Ionicons
+                name={
+                  !destination
+                    ? 'search'
+                    : !routeDrawn
+                      ? 'navigate-circle'
+                      : 'car-sport'
+                }
+                size={22}
+                color={!destination ? Colors.text : '#fff'}
+              />
+            )}
             <View>
               <Text
                 style={[
                   styles.confirmFabText,
                   !destination && styles.confirmFabTextEmpty,
                 ]}>
-                {destination ? 'Xác nhận đặt xe' : 'Tìm điểm đến'}
+                {!destination
+                  ? 'Tìm điểm đến'
+                  : !routeDrawn
+                    ? (loadingRoute ? 'Đang tạo lộ trình...' : 'Xác nhận điểm đến')
+                    : 'Xem giá cước & Chọn xe'}
               </Text>
               {destination && (
-                <Text style={styles.confirmFabSubtext}>
-                  {vehicle.name} · {formatVnd(fare)}
+                <Text
+                  style={styles.confirmFabSubtext}>
+                  {!routeDrawn
+                    ? destination.name
+                    : `${vehicle.name} · ${formatVnd(fare)}`}
                 </Text>
               )}
             </View>
-            <Ionicons
-              name="chevron-forward"
-              size={18}
-              color={destination ? '#fff' : Colors.textSecondary}
-            />
+            {!loadingRoute && (
+              <Ionicons
+                name="chevron-forward"
+                size={18}
+                color={!destination ? Colors.textSecondary : '#fff'}
+              />
+            )}
           </Pressable>
         </View>
       )}
@@ -257,7 +303,7 @@ export default function CustomerHomeScreen() {
             </View>
             <ScrollView style={{ maxHeight: 220 }} keyboardShouldPersistTaps="handled">
               {places.map((p) => (
-                <Row key={p.id} icon="location-outline" title={p.name} subtitle={p.address} onPress={() => selectDestination(p)} />
+                <Row key={p.id} icon="location-outline" title={p.name} subtitle={p.address} onPress={() => handlePickDestination(p)} />
               ))}
             </ScrollView>
             <Text style={ui.muted}>Mẹo: nhấn giữ trên bản đồ để chọn điểm đến.</Text>
