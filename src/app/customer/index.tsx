@@ -43,6 +43,7 @@ export default function CustomerHomeScreen() {
   const [vehicleType, setVehicleType] = useState<VehicleType>('bike');
   const [query, setQuery] = useState('');
   const [liveDriverCoord, setLiveDriverCoord] = useState<LngLat | null>(null);
+  const [isModalVisible, setIsModalVisible] = useState(false);
 
   useEffect(() => {
     const unsubLocation = addListener('driver.location', (data: { lat?: number; lng?: number }) => {
@@ -91,6 +92,7 @@ export default function CustomerHomeScreen() {
     setActiveRoute(null);
     setQuery('');
     setStep('confirm');
+    setIsModalVisible(false);
 
     let activePickup = pickup;
     if (place.id === 'geoapify-route') {
@@ -136,6 +138,7 @@ export default function CustomerHomeScreen() {
     setActiveRoute(null);
     setCustomPickup(null);
     setLiveDriverCoord(null);
+    setIsModalVisible(false);
     setStep('choose');
   };
 
@@ -185,17 +188,63 @@ export default function CustomerHomeScreen() {
       </AppMap>
 
       <SafeAreaView edges={['top']} style={styles.topBar} pointerEvents="box-none">
-        {step === 'confirm' && (
+        {destination && (
           <Pressable style={styles.roundBtn} onPress={reset}>
             <Ionicons name="arrow-back" size={22} color={Colors.text} />
           </Pressable>
         )}
       </SafeAreaView>
 
-      <BottomCard>
-        {step === 'choose' && (
+      {/* Floating Confirm / Pick Ride Button on Bottom Right */}
+      {(step === 'choose' || step === 'confirm') && !isModalVisible && (
+        <View style={styles.fabContainer} pointerEvents="box-none">
+          <Pressable
+            style={[styles.confirmFab, !destination && styles.confirmFabEmpty]}
+            onPress={() => setIsModalVisible(true)}>
+            <Ionicons
+              name={destination ? 'car-sport' : 'search'}
+              size={20}
+              color={destination ? '#fff' : Colors.text}
+            />
+            <View>
+              <Text
+                style={[
+                  styles.confirmFabText,
+                  !destination && styles.confirmFabTextEmpty,
+                ]}>
+                {destination ? 'Xác nhận đặt xe' : 'Tìm điểm đến'}
+              </Text>
+              {destination && (
+                <Text style={styles.confirmFabSubtext}>
+                  {vehicle.name} · {formatVnd(fare)}
+                </Text>
+              )}
+            </View>
+            <Ionicons
+              name="chevron-forward"
+              size={18}
+              color={destination ? '#fff' : Colors.textSecondary}
+            />
+          </Pressable>
+        </View>
+      )}
+
+      {/* Modal Popup (BottomCard) */}
+      {((step === 'choose' || step === 'confirm') ? isModalVisible : true) && (
+        <BottomCard>
+          {(step === 'choose' || step === 'confirm') && (
+            <View style={styles.modalHeaderRow}>
+              <Text style={ui.h2}>{destination ? 'Chọn phương tiện' : 'Bạn muốn đi đâu?'}</Text>
+              <Pressable
+                onPress={() => setIsModalVisible(false)}
+                style={styles.closeModalBtn}>
+                <Ionicons name="close" size={20} color={Colors.textSecondary} />
+              </Pressable>
+            </View>
+          )}
+
+          {step === 'choose' && (
           <>
-            <Text style={ui.h2}>Bạn muốn đi đâu?</Text>
             <View style={styles.search}>
               <Ionicons name="search" size={18} color={Colors.textSecondary} />
               <TextInput
@@ -303,6 +352,7 @@ export default function CustomerHomeScreen() {
           </>
         )}
       </BottomCard>
+      )}
     </View>
   );
 }
@@ -354,4 +404,56 @@ const styles = StyleSheet.create({
   plate: { backgroundColor: Colors.surface, borderRadius: Radius.sm, paddingHorizontal: Spacing.sm, paddingVertical: Spacing.xs },
   plateText: { fontWeight: '700', color: Colors.text },
   actions: { flexDirection: 'row', gap: Spacing.md },
+  fabContainer: {
+    position: 'absolute',
+    bottom: 24,
+    right: 16,
+    zIndex: 99,
+  },
+  confirmFab: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    backgroundColor: Colors.primary,
+    paddingVertical: 12,
+    paddingHorizontal: 18,
+    borderRadius: Radius.pill,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+  confirmFabEmpty: {
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  confirmFabText: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  confirmFabTextEmpty: {
+    color: Colors.text,
+  },
+  confirmFabSubtext: {
+    color: 'rgba(255, 255, 255, 0.85)',
+    fontSize: 12,
+    fontWeight: '500',
+  },
+  modalHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingBottom: Spacing.xs,
+  },
+  closeModalBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: Colors.surface,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
 });
