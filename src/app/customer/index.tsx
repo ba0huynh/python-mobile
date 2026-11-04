@@ -89,7 +89,7 @@ export default function CustomerHomeScreen() {
     }
   }, [step]);
 
-  const handlePickDestination = (place: Place) => {
+  const handlePickDestination = (place: Place, shouldFly = false) => {
     setDestination(place);
     setActiveRoute(null);
     setRouteDrawn(false);
@@ -97,7 +97,9 @@ export default function CustomerHomeScreen() {
     setQuery('');
     setStep('confirm');
 
-    cameraRef.current?.flyTo({ center: place.coord, zoom: 15, duration: 600 });
+    if (shouldFly) {
+      cameraRef.current?.flyTo({ center: place.coord, zoom: 15, duration: 600 });
+    }
   };
 
   const handleConfirmRoute = async () => {
@@ -303,7 +305,7 @@ export default function CustomerHomeScreen() {
             </View>
             <ScrollView style={{ maxHeight: 220 }} keyboardShouldPersistTaps="handled">
               {places.map((p) => (
-                <Row key={p.id} icon="location-outline" title={p.name} subtitle={p.address} onPress={() => handlePickDestination(p)} />
+                <Row key={p.id} icon="location-outline" title={p.name} subtitle={p.address} onPress={() => handlePickDestination(p, true)} />
               ))}
             </ScrollView>
             <Text style={ui.muted}>Mẹo: nhấn giữ trên bản đồ để chọn điểm đến.</Text>
