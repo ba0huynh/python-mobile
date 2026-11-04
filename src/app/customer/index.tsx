@@ -1,12 +1,13 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
-import { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, Alert, Linking, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { AppMap, MapPin, RouteLine, type CameraRef } from '@/components/app-map';
 import { Avatar, BottomCard, Button, Row, ui } from '@/components/ui';
 import { Colors, Radius, Spacing } from '@/constants/theme';
-import { api, type RouteData } from '@/lib/api';
+import { api, type RideData, type RouteData } from '@/lib/api';
+import { useRouter } from 'expo-router';
 import { useAuth } from '@/lib/auth';
 import { useSocket } from '@/lib/socket';
 import { formatKm, formatVnd } from '@/lib/format';
@@ -14,7 +15,6 @@ import { boundsOf, boundsOfCoords, distanceKm, type LngLat } from '@/lib/geo';
 import {
   estimateFare,
   GEOAPIFY_ROUTE,
-  MOCK_DRIVER,
   SAVED_PLACES,
   VEHICLES,
   type Place,
@@ -34,6 +34,7 @@ export default function CustomerHomeScreen() {
   const { addListener } = useSocket();
   const cameraRef = useRef<CameraRef>(null);
 
+  const router = useRouter();
   const [customPickup, setCustomPickup] = useState<LngLat | null>(null);
   const pickup = customPickup ?? currentLocation;
 
@@ -46,6 +47,49 @@ export default function CustomerHomeScreen() {
   const [isModalVisible, setIsModalVisible] = useState(false);
   const [routeDrawn, setRouteDrawn] = useState(false);
   const [loadingRoute, setLoadingRoute] = useState(false);
+  const [currentRide, setCurrentRide] = useState<RideData | null>(null);
+  const [bookingLoading, setBookingLoading] = useState(false);
+  const [ratingStars, setRatingStars] = useState(5);
+  const [ratingComment, setRatingComment] = useState('');
+
+  const reset = useCallback(() => {
+    setDestination(null);
+    setActiveRoute(null);
+    setRouteDrawn(false);
+    setLoadingRoute(false);
+    setCustomPickup(null);
+    setLiveDriverCoord(null);
+    setCurrentRide(null);
+    setIsModalVisible(false);
+    setStep('choose');
+  }, []);
+
+  // Restore active ride on mount if customer is logged in
+  useEffect(() => {
+    if (!customerToken) return;
+    api.rides.current(customerToken).then((res) => {
+      if (res.ride) {
+        setCurrentRide(res.ride);
+        if (res.ride.route) setActiveRoute(res.ride.route);
+        setDestination({
+          id: 'active-dest',
+          name: res.ride.dropoff.address || 'Điểm đến',
+          address: res.ride.dropoff.address || '',
+          coord: [res.ride.dropoff.lng, res.ride.dropoff.lat],
+        });
+        setRouteDrawn(true);
+        if (res.ride.vehicle_type) setVehicleType(res.ride.vehicle_type);
+        if (res.ride.driver && typeof res.ride.driver.lng === 'number' && typeof res.ride.driver.lat === 'number') {
+          setLiveDriverCoord([res.ride.driver.lng, res.ride.driver.lat]);
+        }
+
+        if (res.ride.status === 'PENDING') setStep('searching');
+        else if (res.ride.status === 'ACCEPTED' || res.ride.status === 'ARRIVED') setStep('matched');
+        else if (res.ride.status === 'IN_PROGRESS') setStep('onTrip');
+        else if (res.ride.status === 'COMPLETED') setStep('done');
+      }
+    }).catch(() => {});
+  }, [customerToken]);
 
   useEffect(() => {
     const unsubLocation = addListener('driver.location', (data: { lat?: number; lng?: number }) => {
@@ -53,20 +97,28 @@ export default function CustomerHomeScreen() {
         setLiveDriverCoord([data.lng, data.lat]);
       }
     });
-    const unsubUpdate = addListener('ride.updated', (data: { status?: string }) => {
-      if (data?.status === 'ACCEPTED') {
+    const unsubUpdate = addListener('ride.updated', (data: RideData) => {
+      setCurrentRide(data);
+      if (data?.route) setActiveRoute(data.route);
+      if (data?.driver && typeof data.driver.lng === 'number' && typeof data.driver.lat === 'number') {
+        setLiveDriverCoord([data.driver.lng, data.driver.lat]);
+      }
+
+      if (data?.status === 'ACCEPTED' || data?.status === 'ARRIVED') {
         setStep('matched');
       } else if (data?.status === 'IN_PROGRESS') {
         setStep('onTrip');
       } else if (data?.status === 'COMPLETED') {
         setStep('done');
+      } else if (data?.status === 'CANCELLED') {
+        reset();
       }
     });
     return () => {
       unsubLocation();
       unsubUpdate();
     };
-  }, [addListener]);
+  }, [addListener, reset]);
 
   const km = activeRoute
     ? activeRoute.distance_m / 1000
@@ -82,12 +134,7 @@ export default function CustomerHomeScreen() {
     if (step === 'choose') cameraRef.current?.flyTo({ center: pickup, zoom: 15, duration: 800 });
   }, [pickup, step]);
 
-  useEffect(() => {
-    if (step === 'searching') {
-      const t = setTimeout(() => setStep('matched'), 3000);
-      return () => clearTimeout(t);
-    }
-  }, [step]);
+
 
   const handlePickDestination = (place: Place, shouldFly = false) => {
     setDestination(place);
@@ -151,15 +198,97 @@ export default function CustomerHomeScreen() {
     }
   };
 
-  const reset = () => {
-    setDestination(null);
-    setActiveRoute(null);
-    setRouteDrawn(false);
-    setLoadingRoute(false);
-    setCustomPickup(null);
-    setLiveDriverCoord(null);
-    setIsModalVisible(false);
-    setStep('choose');
+
+
+  const handleBookRide = async () => {
+    if (!destination) return;
+    if (!customerToken) {
+      Alert.alert(
+        'Đăng nhập tài khoản',
+        'Bạn cần đăng nhập tài khoản Khách hàng để tiến hành đặt xe.',
+        [
+          { text: 'Hủy', style: 'cancel' },
+          { text: 'Đăng nhập', onPress: () => router.push('/auth/login?role=customer') },
+        ]
+      );
+      return;
+    }
+
+    setBookingLoading(true);
+    try {
+      const res = await api.rides.create(
+        {
+          vehicle_type: vehicleType,
+          pickup: {
+            lat: pickup[1],
+            lng: pickup[0],
+            address: 'Vị trí hiện tại',
+          },
+          dropoff: {
+            lat: destination.coord[1],
+            lng: destination.coord[0],
+            address: destination.name,
+          },
+        },
+        customerToken
+      );
+      setCurrentRide(res);
+      setStep('searching');
+      setIsModalVisible(false);
+    } catch (err: any) {
+      Alert.alert('Đặt xe thất bại', err.message || 'Vui lòng thử lại sau.');
+    } finally {
+      setBookingLoading(false);
+    }
+  };
+
+  const handleCancelRide = async () => {
+    if (!currentRide || !customerToken) {
+      reset();
+      return;
+    }
+    try {
+      await api.rides.cancel(currentRide.id, customerToken, 'Khách hàng hủy chuyến');
+      reset();
+    } catch (err: any) {
+      Alert.alert('Lỗi', err.message || 'Không thể hủy chuyến.');
+    }
+  };
+
+  const handleAutoAccept = async () => {
+    if (!currentRide || !customerToken) return;
+    try {
+      const updated = await api.rides.autoAccept(currentRide.id, customerToken);
+      setCurrentRide(updated);
+      setStep('matched');
+    } catch (err: any) {
+      Alert.alert('Thông báo', err.message || 'Chưa thể ghép tài xế.');
+    }
+  };
+
+  const handleAutoAdvance = async () => {
+    if (!currentRide || !customerToken) return;
+    try {
+      const updated = await api.rides.autoAdvance(currentRide.id, customerToken);
+      setCurrentRide(updated);
+      if (updated.status === 'IN_PROGRESS') setStep('onTrip');
+      else if (updated.status === 'COMPLETED') setStep('done');
+    } catch (err: any) {
+      Alert.alert('Thông báo', err.message || 'Không thể cập nhật trạng thái.');
+    }
+  };
+
+  const handleSubmitRating = async () => {
+    if (!currentRide || !customerToken) {
+      reset();
+      return;
+    }
+    try {
+      await api.rides.rate(currentRide.id, ratingStars, customerToken, ratingComment);
+    } catch {
+      // Rating submitted or completed
+    }
+    reset();
   };
 
   const places = SAVED_PLACES.filter((p) =>
@@ -343,43 +472,85 @@ export default function CustomerHomeScreen() {
               <Ionicons name="cash-outline" size={18} color={Colors.primary} />
               <Text style={ui.body}>Tiền mặt</Text>
             </View>
-            <Button title={`Đặt ${vehicle.name} · ${formatVnd(fare)}`} onPress={() => setStep('searching')} />
+            <Button title={`Đặt ${vehicle.name} · ${formatVnd(fare)}`} loading={bookingLoading} onPress={handleBookRide} />
           </>
         )}
 
         {step === 'searching' && (
           <>
             <Text style={ui.h2}>Đang tìm tài xế gần bạn...</Text>
-            <Text style={ui.muted}>{vehicle.name} · {formatVnd(fare)}</Text>
-            <Button title="Đang tìm" loading />
-            <Button title="Hủy" variant="secondary" onPress={() => setStep('confirm')} />
+            <Text style={ui.muted}>{vehicle.name} · {formatVnd(fare)} · Hệ thống đang phát cuốc</Text>
+            <Button title="Đang tìm tài xế..." loading />
+            <Button
+              title="Ghép tài xế gần nhất"
+              variant="driver"
+              onPress={handleAutoAccept}
+            />
+            <Button title="Hủy tìm kiếm" variant="secondary" onPress={handleCancelRide} />
           </>
         )}
 
         {(step === 'matched' || step === 'onTrip') && destination && (
           <>
-            <Text style={ui.h2}>{step === 'matched' ? 'Tài xế đang đến · 3 phút' : `Đang đến ${destination.name}`}</Text>
+            <Text style={ui.h2}>
+              {currentRide?.status === 'ARRIVED'
+                ? 'Tài xế đã đến điểm đón!'
+                : step === 'matched'
+                  ? 'Tài xế đang đến điểm đón'
+                  : `Đang di chuyển đến ${destination.name}`}
+            </Text>
             <View style={styles.driverRow}>
-              <Avatar name={MOCK_DRIVER.name} color={Colors.driver} />
+              <Avatar
+                name={currentRide?.driver?.full_name || 'Tài xế'}
+                color={Colors.driver}
+              />
               <View style={{ flex: 1 }}>
-                <Text style={styles.vehicleName}>{MOCK_DRIVER.name}</Text>
-                <Text style={ui.muted}>★ {MOCK_DRIVER.rating} · {MOCK_DRIVER.vehicleName}</Text>
+                <Text style={styles.vehicleName}>
+                  {currentRide?.driver?.full_name || 'Tài xế GoXe'}
+                </Text>
+                <Text style={ui.muted}>
+                  ★ {currentRide?.driver?.rating || '4.9'} · {currentRide?.driver?.vehicle_name || vehicle.name}
+                </Text>
               </View>
               <View style={styles.plate}>
-                <Text style={styles.plateText}>{MOCK_DRIVER.plate}</Text>
+                <Text style={styles.plateText}>
+                  {currentRide?.driver?.vehicle_plate || '59X-000.00'}
+                </Text>
               </View>
             </View>
             <View style={styles.actions}>
-              <Button title="Gọi" variant="secondary" style={{ flex: 1 }} />
-              <Button title="Nhắn tin" variant="secondary" style={{ flex: 1 }} />
+              <Button
+                title="Gọi"
+                variant="secondary"
+                style={{ flex: 1 }}
+                onPress={() => {
+                  if (currentRide?.driver?.phone) {
+                    Linking.openURL(`tel:${currentRide.driver.phone}`);
+                  }
+                }}
+              />
+              <Button
+                title="Nhắn tin"
+                variant="secondary"
+                style={{ flex: 1 }}
+                onPress={() => {
+                  if (currentRide?.driver?.phone) {
+                    Linking.openURL(`sms:${currentRide.driver.phone}`);
+                  }
+                }}
+              />
             </View>
             {step === 'matched' ? (
               <>
-                <Button title="(Demo) Tài xế đã đón" onPress={() => setStep('onTrip')} />
-                <Button title="Hủy chuyến" variant="danger" onPress={reset} />
+                <Button
+                  title={currentRide?.status === 'ARRIVED' ? 'Bắt đầu chuyến đi' : 'Tài xế đã đón'}
+                  variant="driver"
+                  onPress={handleAutoAdvance}
+                />
+                <Button title="Hủy chuyến" variant="danger" onPress={handleCancelRide} />
               </>
             ) : (
-              <Button title="(Demo) Đã đến nơi" onPress={() => setStep('done')} />
+              <Button title="Đã đến nơi (Hoàn thành)" variant="driver" onPress={handleAutoAdvance} />
             )}
           </>
         )}
@@ -389,14 +560,27 @@ export default function CustomerHomeScreen() {
             <View style={{ alignItems: 'center', gap: Spacing.sm }}>
               <Ionicons name="checkmark-circle" size={56} color={Colors.primary} />
               <Text style={ui.h2}>Chuyến đi hoàn thành</Text>
-              <Text style={ui.muted}>Thanh toán tiền mặt {formatVnd(fare)}</Text>
+              <Text style={ui.muted}>Thanh toán tiền mặt {formatVnd(currentRide?.fare || fare)}</Text>
               <View style={{ flexDirection: 'row', gap: Spacing.xs }}>
                 {[1, 2, 3, 4, 5].map((i) => (
-                  <Ionicons key={i} name="star" size={28} color={Colors.warning} />
+                  <Pressable key={i} onPress={() => setRatingStars(i)}>
+                    <Ionicons
+                      name={i <= ratingStars ? 'star' : 'star-outline'}
+                      size={32}
+                      color={Colors.warning}
+                    />
+                  </Pressable>
                 ))}
               </View>
+              <TextInput
+                value={ratingComment}
+                onChangeText={setRatingComment}
+                placeholder="Nhận xét về tài xế (tùy chọn)..."
+                placeholderTextColor={Colors.textSecondary}
+                style={styles.ratingInput}
+              />
             </View>
-            <Button title="Xong" onPress={reset} />
+            <Button title="Gửi đánh giá & Hoàn tất" onPress={handleSubmitRating} />
           </>
         )}
       </BottomCard>
@@ -495,6 +679,16 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingBottom: Spacing.xs,
+  },
+  ratingInput: {
+    width: '100%',
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.md,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
+    fontSize: 14,
+    color: Colors.text,
+    marginTop: Spacing.sm,
   },
   closeModalBtn: {
     width: 32,

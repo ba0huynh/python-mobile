@@ -74,6 +74,52 @@ export type EstimateOption = {
   route: RouteData;
 };
 
+export type RideStatus =
+  | 'PENDING'
+  | 'ACCEPTED'
+  | 'ARRIVED'
+  | 'IN_PROGRESS'
+  | 'COMPLETED'
+  | 'CANCELLED';
+
+export type DriverPublic = {
+  id: string;
+  full_name: string;
+  phone: string;
+  vehicle_type: 'bike' | 'car4' | 'car7';
+  vehicle_name?: string;
+  vehicle_plate: string;
+  rating: string | number;
+  lat?: number;
+  lng?: number;
+};
+
+export type RideData = {
+  id: string;
+  status: RideStatus;
+  vehicle_type: 'bike' | 'car4' | 'car7';
+  pickup: { address: string; lat: number; lng: number };
+  dropoff: { address: string; lat: number; lng: number };
+  distance_m: number;
+  duration_s: number;
+  fare: number;
+  payment_method: string;
+  customer?: { id: string; full_name: string; phone: string };
+  driver?: DriverPublic | null;
+  route?: RouteData | null;
+  approach_route?: RouteData | null;
+  created_at: string;
+  accepted_at?: string | null;
+  arrived_at?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  cancelled_at?: string | null;
+  cancelled_by?: string | null;
+  cancel_reason?: string;
+  rating?: number | null;
+  rating_comment?: string;
+};
+
 export type EstimateResponse = {
   options: EstimateOption[];
 };
@@ -243,6 +289,105 @@ export const api = {
         method: 'POST',
         headers: token ? { Authorization: `Bearer ${token}` } : {},
         body: JSON.stringify(data),
+      }),
+
+    create: (
+      data: {
+        vehicle_type: 'bike' | 'car4' | 'car7';
+        pickup: { lat: number; lng: number; address?: string };
+        dropoff: { lat: number; lng: number; address?: string };
+      },
+      token: string
+    ) =>
+      request<RideData>('/api/rides/', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: JSON.stringify(data),
+      }),
+
+    current: (token: string) =>
+      request<{ ride: RideData | null }>('/api/rides/current/', {
+        headers: { Authorization: `Bearer ${token}` },
+      }),
+
+    get: (id: string, token: string) =>
+      request<RideData>(`/api/rides/${id}/`, {
+        headers: { Authorization: `Bearer ${token}` },
+      }),
+
+    cancel: (id: string, token: string, reason?: string) =>
+      request<RideData>(`/api/rides/${id}/cancel/`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ reason: reason || 'Khách hủy chuyến' }),
+      }),
+
+    rate: (id: string, rating: number, token: string, comment?: string) =>
+      request<RideData>(`/api/rides/${id}/rate/`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ rating, comment: comment || '' }),
+      }),
+
+    history: (token: string) =>
+      request<RideData[]>('/api/rides/', {
+        headers: { Authorization: `Bearer ${token}` },
+      }),
+
+    autoAccept: (id: string, token: string) =>
+      request<RideData>(`/api/rides/${id}/auto-accept/`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      }),
+
+    autoAdvance: (id: string, token: string) =>
+      request<RideData>(`/api/rides/${id}/auto-advance/`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      }),
+  },
+
+  driver: {
+    updateStatus: (
+      data: { status: 'ONLINE' | 'OFFLINE'; lat?: number; lng?: number },
+      token: string
+    ) =>
+      request<DriverProfile>('/api/driver/status/', {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${token}` },
+        body: JSON.stringify(data),
+      }),
+
+    updateLocation: (data: { lat: number; lng: number }, token: string) =>
+      request<void>('/api/driver/location/', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: JSON.stringify(data),
+      }),
+
+    availableRides: (token: string) =>
+      request<{ total: number; rides: (RideData & { distance_to_pickup_m: number })[] }>(
+        '/api/driver/rides/available/',
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      ),
+
+    acceptRide: (rideId: string, token: string) =>
+      request<RideData>(`/api/driver/rides/${rideId}/accept/`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      }),
+
+    updateRideStatus: (
+      rideId: string,
+      status: 'ARRIVED' | 'IN_PROGRESS' | 'COMPLETED',
+      token: string
+    ) =>
+      request<RideData>(`/api/driver/rides/${rideId}/update-status/`, {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ status }),
       }),
   },
 };
