@@ -19,18 +19,19 @@ import { useAuth } from '@/lib/auth';
 import { useRole, type Role } from '@/lib/role';
 
 export default function LoginScreen() {
-  const params = useLocalSearchParams<{ role?: string }>();
+  const params = useLocalSearchParams<{ role?: string; phone?: string; success?: string }>();
   const { role: contextRole, setRole } = useRole();
   const { loginCustomer, loginDriver } = useAuth();
 
   const [activeRole, setActiveRole] = useState<Role>(
     (params.role === 'driver' || contextRole === 'driver') ? 'driver' : 'customer'
   );
-  const [phone, setPhone] = useState('');
+  const [phone, setPhone] = useState(params.phone || '');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [successMsg, setSuccessMsg] = useState<string | null>(params.success || null);
 
   const isDriver = activeRole === 'driver';
   const roleColor = isDriver ? Colors.driver : Colors.primary;
@@ -39,6 +40,7 @@ export default function LoginScreen() {
   const handleRoleChange = (nextRole: Role) => {
     setActiveRole(nextRole);
     setError(null);
+    setSuccessMsg(null);
     setPhone('');
     setPassword('');
   };
@@ -163,6 +165,14 @@ export default function LoginScreen() {
             </Text>
           </View>
 
+          {/* Success Banner */}
+          {successMsg && (
+            <View style={styles.successBox}>
+              <Ionicons name="checkmark-circle" size={20} color={Colors.primary} />
+              <Text style={styles.successText}>{successMsg}</Text>
+            </View>
+          )}
+
           {/* Error Banner */}
           {error && (
             <View style={styles.errorBox}>
@@ -228,6 +238,21 @@ export default function LoginScreen() {
                   />
                 </Pressable>
               </View>
+            </View>
+
+            {/* Forgot password link */}
+            <View style={styles.forgotPassRow}>
+              <Pressable
+                onPress={() =>
+                  router.push({
+                    pathname: '/auth/forgot-password',
+                    params: { role: activeRole, phone },
+                  })
+                }>
+                <Text style={[styles.forgotPassText, { color: roleColor }]}>
+                  Quên mật khẩu?
+                </Text>
+              </Pressable>
             </View>
 
             {/* Quick seed account filler */}
@@ -347,6 +372,22 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: Colors.danger,
   },
+  successBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+    backgroundColor: '#EAF7EE',
+    borderColor: Colors.primary,
+    borderWidth: 1,
+    borderRadius: Radius.sm,
+    padding: Spacing.md,
+  },
+  successText: {
+    flex: 1,
+    fontSize: 13,
+    color: Colors.primary,
+    fontWeight: '600',
+  },
   form: {
     gap: Spacing.md,
   },
@@ -382,6 +423,15 @@ const styles = StyleSheet.create({
   },
   eyeBtn: {
     padding: 6,
+  },
+  forgotPassRow: {
+    alignItems: 'flex-end',
+    marginTop: -4,
+  },
+  forgotPassText: {
+    fontSize: 13,
+    fontWeight: '600',
+    paddingVertical: 4,
   },
   demoBtn: {
     flexDirection: 'row',

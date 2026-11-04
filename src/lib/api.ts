@@ -220,6 +220,18 @@ export const api = {
         headers: { Authorization: `Bearer ${accessToken}` },
         body: JSON.stringify({ refresh: refreshToken }),
       }),
+
+    resetPassword: (data: {
+      phone: string;
+      role?: 'customer' | 'driver';
+      otp?: string;
+      new_password: string;
+      new_password_confirm: string;
+    }) =>
+      request<{ detail: string }>('/api/auth/reset-password/', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
   },
 
   rides: {
