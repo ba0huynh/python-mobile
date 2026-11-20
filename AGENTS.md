@@ -34,7 +34,12 @@ Run lint and typecheck before declaring any task done.
 
 ## Building
 
-This project builds **locally**, not with EAS: `npx expo prebuild --platform android --clean`, then `npx expo run:android`. Full steps and troubleshooting are in the root `AGENTS.md`, section 5.
+This project builds **locally**, without requiring an EAS account. Full guide is in [`ANDROID_BUILD.md`](ANDROID_BUILD.md) and root [`../AGENTS.md`](../AGENTS.md) (section 5).
+
+- `npm run build:apk`: build standalone release `.apk` (fast, arm64).
+- `npm run build:apk -- --all`: build release `.apk` for all architectures (emulators, older devices).
+- `npm run build:dev:apk`: build Expo development build `.apk` (`expo-dev-client`).
+- `npm run android`: build and install development build directly on device/emulator.
 
 ## Rules
 

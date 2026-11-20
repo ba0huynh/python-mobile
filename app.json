@@ -42,7 +42,8 @@
           "imageWidth": 76
         }
       ],
-      "@maplibre/maplibre-react-native"
+      "@maplibre/maplibre-react-native",
+      "./withGradleMemory.js"
     ],
     "experiments": {
       "typedRoutes": true,
