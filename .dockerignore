@@ -1,0 +1,25 @@
+# Rebuilt inside the image.
+node_modules
+dist
+.expo
+web-build
+
+# Native projects: not part of the web build, and large.
+android
+ios
+
+# Never bake local env files into an image; values come in as Build Args.
+.env
+.env.*
+
+# Signing material for native builds.
+*.jks
+*.keystore
+*.p8
+*.p12
+*.key
+*.pem
+
+.git
+.claude
+*.log
