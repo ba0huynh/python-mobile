@@ -45,17 +45,6 @@ export default function LoginScreen() {
     setPassword('');
   };
 
-  const handleFillDemo = () => {
-    if (isDriver) {
-      setPhone('0901234567');
-      setPassword('GoXe!2026');
-    } else {
-      setPhone('0912345678');
-      setPassword('GoXe!2026');
-    }
-    setError(null);
-  };
-
   const handleSubmit = async () => {
     if (!phone.trim()) {
       setError('Vui lòng nhập số điện thoại.');
@@ -255,16 +244,6 @@ export default function LoginScreen() {
               </Pressable>
             </View>
 
-            {/* Quick seed account filler */}
-            <Pressable onPress={handleFillDemo} style={styles.demoBtn}>
-              <Ionicons name="flash-outline" size={16} color={roleColor} />
-              <Text style={[styles.demoBtnText, { color: roleColor }]}>
-                {isDriver
-                  ? 'Điền tài khoản mẫu (0901234567 / GoXe!2026)'
-                  : 'Điền tài khoản mẫu (0912345678 / GoXe!2026)'}
-              </Text>
-            </Pressable>
-
             <Button
               title="Đăng nhập"
               variant={isDriver ? 'driver' : 'primary'}
@@ -432,17 +411,6 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
     paddingVertical: 4,
-  },
-  demoBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    paddingVertical: 6,
-  },
-  demoBtnText: {
-    fontSize: 13,
-    fontWeight: '600',
   },
   footer: {
     flexDirection: 'row',

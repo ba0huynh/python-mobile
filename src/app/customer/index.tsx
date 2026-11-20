@@ -1,574 +1,588 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Linking, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { useEffect, useRef, useState } from 'react';
+import {
+  ActivityIndicator,
+  AppState,
+  Linking,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { AppMap, MapPin, RouteLine, type CameraRef } from '@/components/app-map';
 import { Avatar, BottomCard, Button, Row, ui } from '@/components/ui';
 import { Colors, Radius, Spacing } from '@/constants/theme';
-import { api, type RideData, type RouteData } from '@/lib/api';
-import { useRouter } from 'expo-router';
-import { useAuth } from '@/lib/auth';
-import { useSocket } from '@/lib/socket';
-import { formatKm, formatVnd } from '@/lib/format';
-import { boundsOf, boundsOfCoords, distanceKm, type LngLat } from '@/lib/geo';
+import { confirmAsync, showAlert } from '@/lib/alert';
 import {
-  estimateFare,
-  GEOAPIFY_ROUTE,
-  SAVED_PLACES,
-  VEHICLES,
-  type Place,
-  type VehicleType,
-} from '@/lib/mock';
+  api,
+  ApiError,
+  errorMessage,
+  type DriverLocationEvent,
+  type EstimateOption,
+  type GeoPlace,
+  type RideData,
+  type RideStatus,
+} from '@/lib/api';
+import { useAuth } from '@/lib/auth';
+import { formatDuration, formatKm, formatMeters, formatVnd } from '@/lib/format';
+import { boundsOf, boundsOfCoords, distanceKm, type LngLat } from '@/lib/geo';
+import { useSocket } from '@/lib/socket';
 import { useCurrentLocation } from '@/lib/use-current-location';
+import { vehicleInfo, type VehicleType } from '@/lib/vehicles';
 
-// Booking flow, all mocked on the client for now:
-// choose destination -> pick vehicle -> searching -> driver matched -> on trip -> done
+// Booking flow. The step is derived from server state (the ride) when one exists:
+// choose destination -> confirm (server fare per vehicle) -> searching -> matched -> onTrip -> done
 type Step = 'choose' | 'confirm' | 'searching' | 'matched' | 'onTrip' | 'done';
 
-const SHEET_PADDING = { top: 120, bottom: 420, left: 50, right: 50 };
+type Place = { name: string; address: string; coord: LngLat };
+
+const SHEET_PADDING = { top: 120, bottom: 440, left: 50, right: 50 };
+// Rough city speed used only for the "driver arrives in ~X min" hint.
+const ETA_SPEED_KMH = 22;
+
+function stepForStatus(status: RideStatus): Step {
+  switch (status) {
+    case 'PENDING':
+      return 'searching';
+    case 'ACCEPTED':
+    case 'ARRIVED':
+      return 'matched';
+    case 'IN_PROGRESS':
+      return 'onTrip';
+    default:
+      return 'done';
+  }
+}
+
+function placeLabel(p: Place): string {
+  const text = p.address && p.address !== p.name ? `${p.name}, ${p.address}` : p.name;
+  return text.slice(0, 255);
+}
 
 export default function CustomerHomeScreen() {
-  const { coord: currentLocation } = useCurrentLocation();
-  const { customerToken } = useAuth();
-  const { addListener } = useSocket();
+  const { coord: myCoord, hasFix, granted } = useCurrentLocation({ watch: true });
+  const { customerClient } = useAuth();
+  const { addListener, showBanner } = useSocket();
   const cameraRef = useRef<CameraRef>(null);
 
-  const router = useRouter();
-  const [customPickup, setCustomPickup] = useState<LngLat | null>(null);
-  const pickup = customPickup ?? currentLocation;
-
-  const [step, setStep] = useState<Step>('choose');
+  const [ride, setRide] = useState<RideData | null>(null);
   const [destination, setDestination] = useState<Place | null>(null);
-  const [activeRoute, setActiveRoute] = useState<RouteData | typeof GEOAPIFY_ROUTE | null>(null);
-  const [vehicleType, setVehicleType] = useState<VehicleType>('bike');
+  const [pickupAddress, setPickupAddress] = useState('');
   const [query, setQuery] = useState('');
-  const [liveDriverCoord, setLiveDriverCoord] = useState<LngLat | null>(null);
-  const [isModalVisible, setIsModalVisible] = useState(false);
-  const [routeDrawn, setRouteDrawn] = useState(false);
-  const [loadingRoute, setLoadingRoute] = useState(false);
-  const [currentRide, setCurrentRide] = useState<RideData | null>(null);
-  const [bookingLoading, setBookingLoading] = useState(false);
+  const [results, setResults] = useState<GeoPlace[]>([]);
+  const [searchingPlaces, setSearchingPlaces] = useState(false);
+  const [options, setOptions] = useState<EstimateOption[] | null>(null);
+  const [estimateError, setEstimateError] = useState<string | null>(null);
+  const [estimateNonce, setEstimateNonce] = useState(0);
+  const [vehicleType, setVehicleType] = useState<VehicleType>('bike');
+  const [booking, setBooking] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [driverPos, setDriverPos] = useState<LngLat | null>(null);
+  const [now, setNow] = useState(() => Date.now());
   const [ratingStars, setRatingStars] = useState(5);
   const [ratingComment, setRatingComment] = useState('');
 
-  const reset = useCallback(() => {
+  const step: Step = ride ? stepForStatus(ride.status) : destination ? 'confirm' : 'choose';
+  const pickup: LngLat = ride ? [ride.pickup.lng, ride.pickup.lat] : myCoord;
+  const dropoff: LngLat | null = ride ? [ride.dropoff.lng, ride.dropoff.lat] : (destination?.coord ?? null);
+  const selected = options?.find((o) => o.vehicle_type === vehicleType) ?? options?.[0] ?? null;
+  const pickupKey = `${myCoord[0].toFixed(3)},${myCoord[1].toFixed(3)}`;
+  const destKey = destination ? `${destination.coord[0]},${destination.coord[1]}` : '';
+
+  const resetAll = () => {
+    setRide(null);
     setDestination(null);
-    setActiveRoute(null);
-    setRouteDrawn(false);
-    setLoadingRoute(false);
-    setCustomPickup(null);
-    setLiveDriverCoord(null);
-    setCurrentRide(null);
-    setIsModalVisible(false);
-    setStep('choose');
+    setOptions(null);
+    setEstimateError(null);
+    setDriverPos(null);
+    setQuery('');
+    setResults([]);
+    setRatingStars(5);
+    setRatingComment('');
+  };
+
+  /** Apply a ride coming from REST or the socket. */
+  const applyRide = (next: RideData) => {
+    if (ride && ride.id !== next.id && next.status === 'CANCELLED') return;
+    if (next.status === 'CANCELLED') {
+      setRide(null);
+      setDriverPos(null);
+      if (next.cancelled_by === 'system') {
+        // Keep the destination so the customer can try again right away.
+        setOptions(null);
+        showAlert('Không tìm thấy tài xế', next.cancel_reason || 'Hiện chưa có tài xế phù hợp. Vui lòng thử lại sau.');
+      } else {
+        resetAll();
+      }
+      return;
+    }
+    if (next.status === 'COMPLETED' && next.rating != null) {
+      resetAll();
+      return;
+    }
+    if (ride && ride.status !== 'PENDING' && next.status === 'PENDING') {
+      showBanner({ title: 'Tài xế đã hủy chuyến', message: 'Đang tìm tài xế khác cho bạn...', type: 'warning' });
+    }
+    setRide(next);
+    if (next.status === 'PENDING') setDriverPos(null);
+    else if (typeof next.driver?.lat === 'number' && typeof next.driver?.lng === 'number') {
+      setDriverPos([next.driver.lng, next.driver.lat]);
+    }
+  };
+
+  /** Re-read server state (after reconnect / app foreground) since events may have been missed. */
+  const sync = async () => {
+    try {
+      const res = await api.rides.current(customerClient);
+      if (res.ride) applyRide(res.ride);
+      else if (ride && ride.status !== 'COMPLETED') applyRide(await api.rides.get(customerClient, ride.id));
+    } catch {
+      // Offline: the next reconnect tries again.
+    }
+  };
+
+  // Socket events (re-subscribed every render so handlers see current state).
+  useEffect(() => {
+    const offs = [
+      addListener('ride.updated', (d: RideData) => {
+        if (!ride || d.id === ride.id) applyRide(d);
+      }),
+      addListener('driver.location', (d: DriverLocationEvent) => {
+        if (ride && d.ride_id === ride.id && typeof d.lat === 'number') setDriverPos([d.lng, d.lat]);
+      }),
+      addListener('connected', () => {
+        sync();
+      }),
+    ];
+    return () => offs.forEach((off) => off());
+  });
+
+  const syncRef = useRef(sync);
+  useEffect(() => {
+    syncRef.current = sync;
+  });
+  useEffect(() => {
+    syncRef.current();
+    const sub = AppState.addEventListener('change', (s) => {
+      if (s === 'active') syncRef.current();
+    });
+    return () => sub.remove();
   }, []);
 
-  // Restore active ride on mount if customer is logged in
+  // Pickup address from the live position.
   useEffect(() => {
-    if (!customerToken) return;
-    api.rides.current(customerToken).then((res) => {
-      if (res.ride) {
-        setCurrentRide(res.ride);
-        if (res.ride.route) setActiveRoute(res.ride.route);
-        setDestination({
-          id: 'active-dest',
-          name: res.ride.dropoff.address || 'Điểm đến',
-          address: res.ride.dropoff.address || '',
-          coord: [res.ride.dropoff.lng, res.ride.dropoff.lat],
-        });
-        setRouteDrawn(true);
-        if (res.ride.vehicle_type) setVehicleType(res.ride.vehicle_type);
-        if (res.ride.driver && typeof res.ride.driver.lng === 'number' && typeof res.ride.driver.lat === 'number') {
-          setLiveDriverCoord([res.ride.driver.lng, res.ride.driver.lat]);
-        }
-
-        if (res.ride.status === 'PENDING') setStep('searching');
-        else if (res.ride.status === 'ACCEPTED' || res.ride.status === 'ARRIVED') setStep('matched');
-        else if (res.ride.status === 'IN_PROGRESS') setStep('onTrip');
-        else if (res.ride.status === 'COMPLETED') setStep('done');
-      }
-    }).catch(() => {});
-  }, [customerToken]);
-
-  useEffect(() => {
-    const unsubLocation = addListener('driver.location', (data: { lat?: number; lng?: number }) => {
-      if (typeof data?.lat === 'number' && typeof data?.lng === 'number') {
-        setLiveDriverCoord([data.lng, data.lat]);
-      }
-    });
-    const unsubUpdate = addListener('ride.updated', (data: RideData) => {
-      setCurrentRide(data);
-      if (data?.route) setActiveRoute(data.route);
-      if (data?.driver && typeof data.driver.lng === 'number' && typeof data.driver.lat === 'number') {
-        setLiveDriverCoord([data.driver.lng, data.driver.lat]);
-      }
-
-      if (data?.status === 'ACCEPTED' || data?.status === 'ARRIVED') {
-        setStep('matched');
-      } else if (data?.status === 'IN_PROGRESS') {
-        setStep('onTrip');
-      } else if (data?.status === 'COMPLETED') {
-        setStep('done');
-      } else if (data?.status === 'CANCELLED') {
-        reset();
-      }
-    });
+    if (!hasFix || ride) return;
+    let cancelled = false;
+    api.geo
+      .reverse(customerClient, myCoord[1], myCoord[0])
+      .then((p) => !cancelled && setPickupAddress(p.address || p.name))
+      .catch(() => {});
     return () => {
-      unsubLocation();
-      unsubUpdate();
+      cancelled = true;
     };
-  }, [addListener, reset]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pickupKey, hasFix, Boolean(ride)]);
 
-  const km = activeRoute
-    ? activeRoute.distance_m / 1000
-    : destination
-      ? distanceKm(pickup, destination.coord)
-      : 0;
-  const vehicle = VEHICLES.find((v) => v.type === vehicleType)!;
-  const fare = estimateFare(vehicle, km);
-  // Mock driver starts a little north-east of the pickup point.
-  const driverCoord: LngLat = [pickup[0] + 0.004, pickup[1] + 0.003];
-
+  // Destination search (debounced).
   useEffect(() => {
-    if (step === 'choose') cameraRef.current?.flyTo({ center: pickup, zoom: 15, duration: 800 });
-  }, [pickup, step]);
-
-
-
-  const handlePickDestination = (place: Place, shouldFly = false) => {
-    setDestination(place);
-    setActiveRoute(null);
-    setRouteDrawn(false);
-    setIsModalVisible(false);
-    setQuery('');
-    setStep('confirm');
-
-    if (shouldFly) {
-      cameraRef.current?.flyTo({ center: place.coord, zoom: 15, duration: 600 });
-    }
-  };
-
-  const handleConfirmRoute = async () => {
-    if (!destination) return;
-    setLoadingRoute(true);
-
-    let activePickup = pickup;
-    if (destination.id === 'geoapify-route') {
-      activePickup = [106.6846006495482, 10.758240352495491];
-      setCustomPickup(activePickup);
-      setActiveRoute(GEOAPIFY_ROUTE);
-      setRouteDrawn(true);
-      setLoadingRoute(false);
-      cameraRef.current?.fitBounds(
-        boundsOfCoords(GEOAPIFY_ROUTE.geometry.coordinates as LngLat[]),
-        { padding: SHEET_PADDING, duration: 800 }
-      );
-      return;
-    }
-
-    cameraRef.current?.fitBounds(boundsOf(activePickup, destination.coord), {
-      padding: SHEET_PADDING,
-      duration: 800,
-    });
-
-    try {
-      const res = await api.rides.estimate(
-        {
-          pickup: { lat: activePickup[1], lng: activePickup[0] },
-          dropoff: { lat: destination.coord[1], lng: destination.coord[0] },
-        },
-        customerToken ?? undefined
-      );
-      const opt = res.options.find((o) => o.vehicle_type === vehicleType) || res.options[0];
-      if (opt?.route?.geometry) {
-        setActiveRoute(opt.route);
-        if (opt.route.geometry.coordinates?.length) {
-          cameraRef.current?.fitBounds(
-            boundsOfCoords(opt.route.geometry.coordinates as LngLat[]),
-            { padding: SHEET_PADDING, duration: 800 }
-          );
+    const q = query.trim();
+    let cancelled = false;
+    const t = setTimeout(
+      () => {
+        if (q.length < 2) {
+          setResults([]);
+          setSearchingPlaces(false);
+          return;
         }
-      }
-    } catch {
-      // Straight line fallback
+        setSearchingPlaces(true);
+        api.geo
+          .search(customerClient, q, { lat: myCoord[1], lng: myCoord[0] })
+          .then((r) => !cancelled && setResults(r.results))
+          .catch(() => !cancelled && setResults([]))
+          .finally(() => !cancelled && setSearchingPlaces(false));
+      },
+      q.length < 2 ? 0 : 350
+    );
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query]);
+
+  // Server fare estimate whenever the trip endpoints change.
+  useEffect(() => {
+    if (ride || !destination || !hasFix) return;
+    let cancelled = false;
+    api.rides
+      .estimate(customerClient, {
+        pickup: { lat: myCoord[1], lng: myCoord[0] },
+        dropoff: { lat: destination.coord[1], lng: destination.coord[0] },
+      })
+      .then((res) => {
+        if (cancelled) return;
+        setOptions(res.options);
+        setEstimateError(null);
+      })
+      .catch((err) => !cancelled && setEstimateError(errorMessage(err, 'Không tính được giá cước.')));
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [destKey, pickupKey, hasFix, ride?.id, estimateNonce]);
+
+  // Searching countdown.
+  useEffect(() => {
+    if (step !== 'searching') return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [step]);
+
+  // Camera: move only when the stage changes, not on every GPS tick.
+  const cameraKey = `${step}|${hasFix}|${selected?.route?.id ?? ''}|${driverPos ? 'd' : ''}|${ride?.id ?? ''}`;
+  useEffect(() => {
+    const cam = cameraRef.current;
+    if (!cam) return;
+    if (step === 'choose') {
+      cam.flyTo({ center: myCoord, zoom: 15, duration: 800 });
+    } else if (step === 'confirm' && dropoff) {
+      const coords = selected?.route?.geometry?.coordinates as LngLat[] | undefined;
+      cam.fitBounds(coords?.length ? boundsOfCoords(coords) : boundsOf(pickup, dropoff), {
+        padding: SHEET_PADDING,
+        duration: 800,
+      });
+    } else if (step === 'searching') {
+      cam.flyTo({ center: pickup, zoom: 15, duration: 800 });
+    } else if (step === 'matched') {
+      if (driverPos) cam.fitBounds(boundsOf(driverPos, pickup), { padding: SHEET_PADDING, duration: 800 });
+      else cam.flyTo({ center: pickup, zoom: 15, duration: 800 });
+    } else if (step === 'onTrip' && dropoff) {
+      const coords = ride?.route?.geometry?.coordinates as LngLat[] | undefined;
+      cam.fitBounds(coords?.length ? boundsOfCoords(coords) : boundsOf(pickup, dropoff), {
+        padding: SHEET_PADDING,
+        duration: 800,
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cameraKey]);
+
+  // --- Actions -----------------------------------------------------------------------
+
+  const chooseDestination = (place: Place) => {
+    setDestination(place);
+    setOptions(null);
+    setEstimateError(null);
+    setQuery('');
+    setResults([]);
+  };
+
+  const handleMapPress = (c: LngLat) => {
+    if (step !== 'choose' && step !== 'confirm') return;
+    const fallback = `${c[1].toFixed(5)}, ${c[0].toFixed(5)}`;
+    chooseDestination({ name: 'Điểm đã chọn trên bản đồ', address: fallback, coord: c });
+    api.geo
+      .reverse(customerClient, c[1], c[0])
+      .then((p) =>
+        setDestination((curr) =>
+          curr && curr.coord[0] === c[0] && curr.coord[1] === c[1]
+            ? { name: p.name || 'Điểm đã chọn', address: p.address || fallback, coord: c }
+            : curr
+        )
+      )
+      .catch(() => {});
+  };
+
+  const handleBook = async () => {
+    if (!destination || !selected) return;
+    if (!hasFix) {
+      showAlert('Chưa xác định được vị trí', 'Vui lòng bật định vị để GoXe biết điểm đón của bạn.');
+      return;
+    }
+    setBooking(true);
+    try {
+      const created = await api.rides.create(customerClient, {
+        vehicle_type: selected.vehicle_type,
+        pickup: { lat: myCoord[1], lng: myCoord[0], address: (pickupAddress || 'Vị trí của tôi').slice(0, 255) },
+        dropoff: { lat: destination.coord[1], lng: destination.coord[0], address: placeLabel(destination) },
+      });
+      applyRide(created);
+    } catch (err) {
+      showAlert('Đặt xe thất bại', errorMessage(err));
+      if (err instanceof ApiError && err.status === 400) sync();
     } finally {
-      setRouteDrawn(true);
-      setLoadingRoute(false);
+      setBooking(false);
     }
   };
 
-
-
-  const handleBookRide = async () => {
-    if (!destination) return;
-    if (!customerToken) {
-      Alert.alert(
-        'Đăng nhập tài khoản',
-        'Bạn cần đăng nhập tài khoản Khách hàng để tiến hành đặt xe.',
-        [
-          { text: 'Hủy', style: 'cancel' },
-          { text: 'Đăng nhập', onPress: () => router.push('/auth/login?role=customer') },
-        ]
-      );
-      return;
-    }
-
-    setBookingLoading(true);
+  const handleCancel = async () => {
+    if (!ride) return;
+    const ok = await confirmAsync(
+      'Hủy chuyến?',
+      step === 'searching' ? 'Bạn muốn dừng tìm tài xế?' : 'Tài xế đang trên đường đến đón bạn. Bạn chắc chắn muốn hủy?',
+      { confirmText: 'Hủy chuyến', cancelText: 'Không', destructive: true }
+    );
+    if (!ok) return;
+    setBusy(true);
     try {
-      const res = await api.rides.create(
-        {
-          vehicle_type: vehicleType,
-          pickup: {
-            lat: pickup[1],
-            lng: pickup[0],
-            address: 'Vị trí hiện tại',
-          },
-          dropoff: {
-            lat: destination.coord[1],
-            lng: destination.coord[0],
-            address: destination.name,
-          },
-        },
-        customerToken
-      );
-      setCurrentRide(res);
-      setStep('searching');
-      setIsModalVisible(false);
-    } catch (err: any) {
-      Alert.alert('Đặt xe thất bại', err.message || 'Vui lòng thử lại sau.');
+      await api.rides.cancel(customerClient, ride.id, 'Khách hàng hủy chuyến');
+      resetAll();
+    } catch (err) {
+      showAlert('Không thể hủy chuyến', errorMessage(err));
+      sync();
     } finally {
-      setBookingLoading(false);
+      setBusy(false);
     }
   };
 
-  const handleCancelRide = async () => {
-    if (!currentRide || !customerToken) {
-      reset();
-      return;
-    }
+  const handleRate = async () => {
+    if (!ride) return;
+    setBusy(true);
     try {
-      await api.rides.cancel(currentRide.id, customerToken, 'Khách hàng hủy chuyến');
-      reset();
-    } catch (err: any) {
-      Alert.alert('Lỗi', err.message || 'Không thể hủy chuyến.');
+      await api.rides.rate(customerClient, ride.id, ratingStars, ratingComment.trim());
+      resetAll();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 400) resetAll();
+      else showAlert('Không gửi được đánh giá', errorMessage(err));
+    } finally {
+      setBusy(false);
     }
   };
 
-  const handleAutoAccept = async () => {
-    if (!currentRide || !customerToken) return;
-    try {
-      const updated = await api.rides.autoAccept(currentRide.id, customerToken);
-      setCurrentRide(updated);
-      setStep('matched');
-    } catch (err: any) {
-      Alert.alert('Thông báo', err.message || 'Chưa thể ghép tài xế.');
-    }
+  const callDriver = (scheme: 'tel' | 'sms') => {
+    const phone = ride?.driver?.phone;
+    if (phone) Linking.openURL(`${scheme}:${phone}`).catch(() => showAlert('Không mở được ứng dụng', phone));
   };
 
-  const handleAutoAdvance = async () => {
-    if (!currentRide || !customerToken) return;
-    try {
-      const updated = await api.rides.autoAdvance(currentRide.id, customerToken);
-      setCurrentRide(updated);
-      if (updated.status === 'IN_PROGRESS') setStep('onTrip');
-      else if (updated.status === 'COMPLETED') setStep('done');
-    } catch (err: any) {
-      Alert.alert('Thông báo', err.message || 'Không thể cập nhật trạng thái.');
-    }
-  };
+  // --- Derived display values -----------------------------------------------------------
 
-  const handleSubmitRating = async () => {
-    if (!currentRide || !customerToken) {
-      reset();
-      return;
-    }
-    try {
-      await api.rides.rate(currentRide.id, ratingStars, customerToken, ratingComment);
-    } catch {
-      // Rating submitted or completed
-    }
-    reset();
-  };
-
-  const places = SAVED_PLACES.filter((p) =>
-    `${p.name} ${p.address}`.toLowerCase().includes(query.trim().toLowerCase()),
-  );
+  const vehicle = vehicleInfo(ride?.vehicle_type ?? selected?.vehicle_type ?? vehicleType);
+  const searchSecondsLeft = ride?.search_expires_at
+    ? Math.max(0, Math.round((new Date(ride.search_expires_at).getTime() - now) / 1000))
+    : null;
+  const driverKm = driverPos ? distanceKm(driverPos, pickup) : null;
+  const etaMin = driverKm !== null ? Math.max(1, Math.round(((driverKm * 1.3) / ETA_SPEED_KMH) * 60)) : null;
+  const approachGeometry = ride?.approach_route?.geometry;
 
   return (
     <View style={ui.screen}>
-      <AppMap
-        initialCenter={pickup}
-        cameraRef={cameraRef}
-        onPress={
-          step === 'choose' || step === 'confirm'
-            ? (c) =>
-                handlePickDestination({
-                  id: 'pin',
-                  name: 'Điểm đã chọn trên bản đồ',
-                  address: `${c[1].toFixed(5)}, ${c[0].toFixed(5)}`,
-                  coord: c,
-                })
-            : undefined
-        }
-        onLongPress={
-          step === 'choose' || step === 'confirm'
-            ? (c) =>
-                handlePickDestination({
-                  id: 'pin',
-                  name: 'Điểm đã chọn trên bản đồ',
-                  address: `${c[1].toFixed(5)}, ${c[0].toFixed(5)}`,
-                  coord: c,
-                })
-            : undefined
-        }>
-        {destination && routeDrawn && (
+      <AppMap initialCenter={myCoord} cameraRef={cameraRef} onPress={handleMapPress} onLongPress={handleMapPress}>
+        {step === 'confirm' && dropoff && (
+          <RouteLine id="trip" geometry={selected?.route?.geometry} from={pickup} to={dropoff} />
+        )}
+        {(step === 'searching' || step === 'onTrip') && dropoff && (
+          <RouteLine id="trip" geometry={ride?.route?.geometry} from={pickup} to={dropoff} />
+        )}
+        {step === 'matched' && (approachGeometry || driverPos) && (
           <RouteLine
-            geometry={activeRoute?.geometry}
-            from={pickup}
-            to={destination.coord}
+            id="approach"
+            geometry={approachGeometry}
+            from={driverPos ?? undefined}
+            to={pickup}
+            color={Colors.driver}
           />
         )}
-        <MapPin id="pickup" coord={pickup} kind="pickup" />
-        {destination && <MapPin id="dropoff" coord={destination.coord} kind="dropoff" />}
-        {(step === 'matched' || step === 'onTrip') && (
-          <MapPin id="driver" coord={liveDriverCoord ?? driverCoord} kind="driver" />
-        )}
+        {step !== 'onTrip' && <MapPin id="pickup" coord={pickup} kind="pickup" />}
+        {dropoff && <MapPin id="dropoff" coord={dropoff} kind="dropoff" />}
+        {(step === 'matched' || step === 'onTrip') && driverPos && <MapPin id="driver" coord={driverPos} kind="driver" />}
       </AppMap>
 
       <SafeAreaView edges={['top']} style={styles.topBar} pointerEvents="box-none">
-        {destination && (
-          <Pressable style={styles.roundBtn} onPress={reset}>
+        {step === 'confirm' && (
+          <Pressable style={styles.roundBtn} onPress={resetAll}>
             <Ionicons name="arrow-back" size={22} color={Colors.text} />
           </Pressable>
         )}
+        {granted === false && (
+          <View style={styles.warnPill}>
+            <Ionicons name="location-outline" size={16} color="#fff" />
+            <Text style={styles.warnText}>Hãy cho phép GoXe truy cập vị trí để đặt xe</Text>
+          </View>
+        )}
       </SafeAreaView>
 
-      {/* Floating Confirm / Pick Ride Button on Bottom Right */}
-      {(step === 'choose' || step === 'confirm') && !isModalVisible && (
-        <View style={styles.fabContainer} pointerEvents="box-none">
-          <Pressable
-            disabled={loadingRoute}
-            style={[styles.confirmFab, !destination && styles.confirmFabEmpty]}
-            onPress={() => {
-              if (!destination) {
-                setIsModalVisible(true);
-              } else if (!routeDrawn) {
-                handleConfirmRoute();
-              } else {
-                setIsModalVisible(true);
-              }
-            }}>
-            {loadingRoute ? (
-              <ActivityIndicator size="small" color="#fff" />
-            ) : (
-              <Ionicons
-                name={
-                  !destination
-                    ? 'search'
-                    : !routeDrawn
-                      ? 'navigate-circle'
-                      : 'car-sport'
-                }
-                size={22}
-                color={!destination ? Colors.text : '#fff'}
-              />
-            )}
-            <View>
-              <Text
-                style={[
-                  styles.confirmFabText,
-                  !destination && styles.confirmFabTextEmpty,
-                ]}>
-                {!destination
-                  ? 'Tìm điểm đến'
-                  : !routeDrawn
-                    ? (loadingRoute ? 'Đang tạo lộ trình...' : 'Xác nhận điểm đến')
-                    : 'Xem giá cước & Chọn xe'}
-              </Text>
-              {destination && (
-                <Text
-                  style={styles.confirmFabSubtext}>
-                  {!routeDrawn
-                    ? destination.name
-                    : `${vehicle.name} · ${formatVnd(fare)}`}
-                </Text>
-              )}
-            </View>
-            {!loadingRoute && (
-              <Ionicons
-                name="chevron-forward"
-                size={18}
-                color={!destination ? Colors.textSecondary : '#fff'}
-              />
-            )}
-          </Pressable>
-        </View>
-      )}
-
-      {/* Modal Popup (BottomCard) */}
-      {((step === 'choose' || step === 'confirm') ? isModalVisible : true) && (
-        <BottomCard>
-          {(step === 'choose' || step === 'confirm') && (
-            <View style={styles.modalHeaderRow}>
-              <Text style={ui.h2}>{destination ? 'Chọn phương tiện' : 'Bạn muốn đi đâu?'}</Text>
-              <Pressable
-                onPress={() => setIsModalVisible(false)}
-                style={styles.closeModalBtn}>
-                <Ionicons name="close" size={20} color={Colors.textSecondary} />
-              </Pressable>
-            </View>
-          )}
-
-          {step === 'choose' && (
+      <BottomCard>
+        {step === 'choose' && (
           <>
+            <Text style={ui.h2}>Bạn muốn đi đâu?</Text>
+            <Row
+              icon="radio-button-on"
+              title="Điểm đón"
+              subtitle={hasFix ? pickupAddress || 'Vị trí hiện tại' : 'Đang xác định vị trí...'}
+            />
             <View style={styles.search}>
               <Ionicons name="search" size={18} color={Colors.textSecondary} />
               <TextInput
                 value={query}
                 onChangeText={setQuery}
-                placeholder="Tìm điểm đến"
+                placeholder="Nhập điểm đến"
                 placeholderTextColor={Colors.textSecondary}
                 style={styles.searchInput}
+                returnKeyType="search"
               />
+              {searchingPlaces && <ActivityIndicator size="small" color={Colors.primary} />}
             </View>
-            <ScrollView style={{ maxHeight: 220 }} keyboardShouldPersistTaps="handled">
-              {places.map((p) => (
-                <Row key={p.id} icon="location-outline" title={p.name} subtitle={p.address} onPress={() => handlePickDestination(p, true)} />
-              ))}
-            </ScrollView>
-            <Text style={ui.muted}>Mẹo: nhấn giữ trên bản đồ để chọn điểm đến.</Text>
+            {results.length > 0 && (
+              <ScrollView style={{ maxHeight: 240 }} keyboardShouldPersistTaps="handled">
+                {results.map((p, i) => (
+                  <Row
+                    key={`${p.lat},${p.lng},${i}`}
+                    icon="location-outline"
+                    title={p.name}
+                    subtitle={p.address}
+                    onPress={() => chooseDestination({ name: p.name, address: p.address, coord: [p.lng, p.lat] })}
+                  />
+                ))}
+              </ScrollView>
+            )}
+            {query.trim().length >= 2 && !searchingPlaces && results.length === 0 && (
+              <Text style={ui.muted}>Không tìm thấy địa điểm phù hợp.</Text>
+            )}
+            <Text style={ui.muted}>Hoặc chạm vào bản đồ để chọn điểm đến.</Text>
           </>
         )}
 
         {step === 'confirm' && destination && (
           <>
             <View>
-              <Row icon="ellipse" title="Vị trí hiện tại" subtitle="Điểm đón" />
+              <Row icon="radio-button-on" title="Điểm đón" subtitle={pickupAddress || 'Vị trí hiện tại'} />
               <Row
                 icon="location"
                 title={destination.name}
-                subtitle={`${destination.address} · ${formatKm(km)}${
-                  activeRoute && 'duration_s' in activeRoute
-                    ? ` (~${Math.round(activeRoute.duration_s / 60)} phút)`
-                    : ''
-                }`}
+                subtitle={
+                  selected
+                    ? `${formatMeters(selected.distance_m)} · ~${formatDuration(selected.duration_s)}`
+                    : destination.address
+                }
               />
             </View>
-            {VEHICLES.map((v) => {
-              const active = v.type === vehicleType;
-              return (
-                <Pressable key={v.type} onPress={() => setVehicleType(v.type)} style={[styles.vehicle, active && styles.vehicleActive]}>
-                  <Ionicons name={v.icon} size={26} color={active ? Colors.primary : Colors.textSecondary} />
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.vehicleName}>{v.name}</Text>
-                    <Text style={ui.muted}>{v.seats} chỗ</Text>
-                  </View>
-                  <Text style={styles.vehicleFare}>{formatVnd(estimateFare(v, km))}</Text>
-                </Pressable>
-              );
-            })}
-            <View style={styles.payRow}>
-              <Ionicons name="cash-outline" size={18} color={Colors.primary} />
-              <Text style={ui.body}>Tiền mặt</Text>
-            </View>
-            <Button title={`Đặt ${vehicle.name} · ${formatVnd(fare)}`} loading={bookingLoading} onPress={handleBookRide} />
-          </>
-        )}
-
-        {step === 'searching' && (
-          <>
-            <Text style={ui.h2}>Đang tìm tài xế gần bạn...</Text>
-            <Text style={ui.muted}>{vehicle.name} · {formatVnd(fare)} · Hệ thống đang phát cuốc</Text>
-            <Button title="Đang tìm tài xế..." loading />
-            <Button
-              title="Ghép tài xế gần nhất"
-              variant="driver"
-              onPress={handleAutoAccept}
-            />
-            <Button title="Hủy tìm kiếm" variant="secondary" onPress={handleCancelRide} />
-          </>
-        )}
-
-        {(step === 'matched' || step === 'onTrip') && destination && (
-          <>
-            <Text style={ui.h2}>
-              {currentRide?.status === 'ARRIVED'
-                ? 'Tài xế đã đến điểm đón!'
-                : step === 'matched'
-                  ? 'Tài xế đang đến điểm đón'
-                  : `Đang di chuyển đến ${destination.name}`}
-            </Text>
-            <View style={styles.driverRow}>
-              <Avatar
-                name={currentRide?.driver?.full_name || 'Tài xế'}
-                color={Colors.driver}
-              />
-              <View style={{ flex: 1 }}>
-                <Text style={styles.vehicleName}>
-                  {currentRide?.driver?.full_name || 'Tài xế GoXe'}
-                </Text>
-                <Text style={ui.muted}>
-                  ★ {currentRide?.driver?.rating || '4.9'} · {currentRide?.driver?.vehicle_name || vehicle.name}
-                </Text>
-              </View>
-              <View style={styles.plate}>
-                <Text style={styles.plateText}>
-                  {currentRide?.driver?.vehicle_plate || '59X-000.00'}
-                </Text>
-              </View>
-            </View>
-            <View style={styles.actions}>
-              <Button
-                title="Gọi"
-                variant="secondary"
-                style={{ flex: 1 }}
-                onPress={() => {
-                  if (currentRide?.driver?.phone) {
-                    Linking.openURL(`tel:${currentRide.driver.phone}`);
-                  }
-                }}
-              />
-              <Button
-                title="Nhắn tin"
-                variant="secondary"
-                style={{ flex: 1 }}
-                onPress={() => {
-                  if (currentRide?.driver?.phone) {
-                    Linking.openURL(`sms:${currentRide.driver.phone}`);
-                  }
-                }}
-              />
-            </View>
-            {step === 'matched' ? (
+            {estimateError ? (
               <>
+                <Text style={styles.errorText}>{estimateError}</Text>
                 <Button
-                  title={currentRide?.status === 'ARRIVED' ? 'Bắt đầu chuyến đi' : 'Tài xế đã đón'}
-                  variant="driver"
-                  onPress={handleAutoAdvance}
+                  title="Thử lại"
+                  variant="secondary"
+                  onPress={() => {
+                    setEstimateError(null);
+                    setEstimateNonce((n) => n + 1);
+                  }}
                 />
-                <Button title="Hủy chuyến" variant="danger" onPress={handleCancelRide} />
               </>
+            ) : !hasFix ? (
+              <Text style={styles.errorText}>
+                Chưa xác định được vị trí của bạn. Hãy bật định vị để xem giá cước và đặt xe.
+              </Text>
+            ) : !options ? (
+              <View style={styles.loadingRow}>
+                <ActivityIndicator color={Colors.primary} />
+                <Text style={ui.muted}>Đang tính giá cước...</Text>
+              </View>
             ) : (
-              <Button title="Đã đến nơi (Hoàn thành)" variant="driver" onPress={handleAutoAdvance} />
+              <>
+                {options.map((o) => {
+                  const info = vehicleInfo(o.vehicle_type);
+                  const active = o.vehicle_type === selected?.vehicle_type;
+                  return (
+                    <Pressable
+                      key={o.vehicle_type}
+                      onPress={() => setVehicleType(o.vehicle_type)}
+                      style={[styles.vehicle, active && styles.vehicleActive]}>
+                      <Ionicons name={info.icon} size={26} color={active ? Colors.primary : Colors.textSecondary} />
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.vehicleName}>{o.name || info.name}</Text>
+                        <Text style={ui.muted}>
+                          {o.seats} chỗ ·{' '}
+                          {o.drivers_nearby > 0 ? `${o.drivers_nearby} tài xế gần bạn` : 'Không có tài xế gần'}
+                        </Text>
+                      </View>
+                      <Text style={styles.vehicleFare}>{formatVnd(o.fare)}</Text>
+                    </Pressable>
+                  );
+                })}
+                <View style={styles.payRow}>
+                  <Ionicons name="cash-outline" size={18} color={Colors.primary} />
+                  <Text style={ui.body}>Tiền mặt</Text>
+                </View>
+                {selected && (
+                  <Button
+                    title={`Đặt ${selected.name || vehicle.name} · ${formatVnd(selected.fare)}`}
+                    loading={booking}
+                    disabled={!hasFix}
+                    onPress={handleBook}
+                  />
+                )}
+              </>
             )}
           </>
         )}
 
-        {step === 'done' && (
+        {step === 'searching' && ride && (
+          <>
+            <View style={styles.searchingHeader}>
+              <ActivityIndicator color={Colors.primary} />
+              <Text style={ui.h2}>Đang tìm tài xế gần bạn...</Text>
+            </View>
+            <Text style={ui.muted}>
+              {vehicle.name} · {formatVnd(ride.fare)} tiền mặt
+              {searchSecondsLeft !== null ? ` · còn ${Math.floor(searchSecondsLeft / 60)}:${String(searchSecondsLeft % 60).padStart(2, '0')}` : ''}
+            </Text>
+            <Row icon="location" title={ride.dropoff.address} subtitle={`${formatMeters(ride.distance_m)} · ~${formatDuration(ride.duration_s)}`} />
+            <Button title="Hủy tìm kiếm" variant="secondary" loading={busy} onPress={handleCancel} />
+          </>
+        )}
+
+        {(step === 'matched' || step === 'onTrip') && ride && (
+          <>
+            <Text style={ui.h2}>
+              {ride.status === 'ARRIVED'
+                ? 'Tài xế đã đến điểm đón!'
+                : step === 'matched'
+                  ? etaMin !== null
+                    ? `Tài xế đến trong ~${etaMin} phút`
+                    : 'Tài xế đang đến điểm đón'
+                  : `Đang đến ${ride.dropoff.address}`}
+            </Text>
+            {step === 'matched' && driverKm !== null && ride.status !== 'ARRIVED' && (
+              <Text style={ui.muted}>Tài xế cách bạn {formatKm(driverKm)}</Text>
+            )}
+            {ride.driver && (
+              <View style={styles.driverRow}>
+                <Avatar name={ride.driver.full_name || 'Tài xế'} color={Colors.driver} />
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.vehicleName}>{ride.driver.full_name}</Text>
+                  <Text style={ui.muted}>
+                    ★ {Number(ride.driver.rating).toFixed(1)} · {ride.driver.vehicle_name || vehicle.name}
+                  </Text>
+                </View>
+                <View style={styles.plate}>
+                  <Text style={styles.plateText}>{ride.driver.vehicle_plate}</Text>
+                </View>
+              </View>
+            )}
+            <View style={styles.actions}>
+              <Button title="Gọi" variant="secondary" style={{ flex: 1 }} onPress={() => callDriver('tel')} />
+              <Button title="Nhắn tin" variant="secondary" style={{ flex: 1 }} onPress={() => callDriver('sms')} />
+            </View>
+            <Text style={ui.muted}>Thanh toán {formatVnd(ride.fare)} tiền mặt khi kết thúc chuyến.</Text>
+            {step === 'matched' && <Button title="Hủy chuyến" variant="danger" loading={busy} onPress={handleCancel} />}
+          </>
+        )}
+
+        {step === 'done' && ride && (
           <>
             <View style={{ alignItems: 'center', gap: Spacing.sm }}>
               <Ionicons name="checkmark-circle" size={56} color={Colors.primary} />
               <Text style={ui.h2}>Chuyến đi hoàn thành</Text>
-              <Text style={ui.muted}>Thanh toán tiền mặt {formatVnd(currentRide?.fare || fare)}</Text>
+              <Text style={ui.muted}>Vui lòng thanh toán tiền mặt cho tài xế</Text>
+              <Text style={styles.total}>{formatVnd(ride.fare)}</Text>
+              <Text style={ui.muted}>Đánh giá {ride.driver?.full_name || 'tài xế'}</Text>
               <View style={{ flexDirection: 'row', gap: Spacing.xs }}>
                 {[1, 2, 3, 4, 5].map((i) => (
-                  <Pressable key={i} onPress={() => setRatingStars(i)}>
-                    <Ionicons
-                      name={i <= ratingStars ? 'star' : 'star-outline'}
-                      size={32}
-                      color={Colors.warning}
-                    />
+                  <Pressable key={i} onPress={() => setRatingStars(i)} hitSlop={6}>
+                    <Ionicons name={i <= ratingStars ? 'star' : 'star-outline'} size={32} color={Colors.warning} />
                   </Pressable>
                 ))}
               </View>
@@ -577,20 +591,23 @@ export default function CustomerHomeScreen() {
                 onChangeText={setRatingComment}
                 placeholder="Nhận xét về tài xế (tùy chọn)..."
                 placeholderTextColor={Colors.textSecondary}
+                maxLength={500}
                 style={styles.ratingInput}
               />
             </View>
-            <Button title="Gửi đánh giá & Hoàn tất" onPress={handleSubmitRating} />
+            <View style={styles.actions}>
+              <Button title="Bỏ qua" variant="secondary" style={{ flex: 1 }} onPress={resetAll} />
+              <Button title="Gửi đánh giá" style={{ flex: 2 }} loading={busy} onPress={handleRate} />
+            </View>
           </>
         )}
       </BottomCard>
-      )}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  topBar: { position: 'absolute', top: 0, left: 0, right: 0, padding: Spacing.lg },
+  topBar: { position: 'absolute', top: 0, left: 0, right: 0, padding: Spacing.lg, gap: Spacing.sm },
   roundBtn: {
     width: 44,
     height: 44,
@@ -604,6 +621,17 @@ const styles = StyleSheet.create({
     shadowRadius: 4,
     shadowOffset: { width: 0, height: 2 },
   },
+  warnPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+    alignSelf: 'center',
+    backgroundColor: Colors.danger,
+    borderRadius: Radius.pill,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
+  },
+  warnText: { color: '#fff', fontWeight: '600', fontSize: 13 },
   search: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -613,12 +641,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.md,
     height: 46,
   },
-  searchInput: {
-    flex: 1,
-    fontSize: 15,
-    color: Colors.text,
-    outlineWidth: 0,
-  },
+  searchInput: { flex: 1, fontSize: 15, color: Colors.text, outlineWidth: 0 },
+  loadingRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.sm, paddingVertical: Spacing.md },
+  errorText: { color: Colors.danger, fontSize: 14 },
   vehicle: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -632,54 +657,17 @@ const styles = StyleSheet.create({
   vehicleName: { fontSize: 15, fontWeight: '700', color: Colors.text },
   vehicleFare: { fontSize: 15, fontWeight: '700', color: Colors.text },
   payRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.sm },
+  searchingHeader: { flexDirection: 'row', alignItems: 'center', gap: Spacing.sm },
   driverRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.md },
-  plate: { backgroundColor: Colors.surface, borderRadius: Radius.sm, paddingHorizontal: Spacing.sm, paddingVertical: Spacing.xs },
+  plate: {
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.sm,
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: Spacing.xs,
+  },
   plateText: { fontWeight: '700', color: Colors.text },
   actions: { flexDirection: 'row', gap: Spacing.md },
-  fabContainer: {
-    position: 'absolute',
-    bottom: 24,
-    right: 16,
-    zIndex: 99,
-  },
-  confirmFab: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    backgroundColor: Colors.primary,
-    paddingVertical: 12,
-    paddingHorizontal: 18,
-    borderRadius: Radius.pill,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.25,
-    shadowRadius: 8,
-    elevation: 8,
-  },
-  confirmFabEmpty: {
-    backgroundColor: '#fff',
-    borderWidth: 1,
-    borderColor: Colors.border,
-  },
-  confirmFabText: {
-    color: '#fff',
-    fontSize: 15,
-    fontWeight: '700',
-  },
-  confirmFabTextEmpty: {
-    color: Colors.text,
-  },
-  confirmFabSubtext: {
-    color: 'rgba(255, 255, 255, 0.85)',
-    fontSize: 12,
-    fontWeight: '500',
-  },
-  modalHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingBottom: Spacing.xs,
-  },
+  total: { fontSize: 28, fontWeight: '800', color: Colors.text },
   ratingInput: {
     width: '100%',
     backgroundColor: Colors.surface,
@@ -689,13 +677,5 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: Colors.text,
     marginTop: Spacing.sm,
-  },
-  closeModalBtn: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: Colors.surface,
-    alignItems: 'center',
-    justifyContent: 'center',
   },
 });

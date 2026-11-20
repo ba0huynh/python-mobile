@@ -3,34 +3,61 @@ import { useEffect, useState } from 'react';
 
 import { DEFAULT_CENTER, type LngLat } from './geo';
 
+type Options = {
+  /** Keep tracking the device (watchPositionAsync) instead of reading it once. */
+  watch?: boolean;
+};
+
 /**
- * Asks for location permission once and returns the device position.
- * Falls back to DEFAULT_CENTER when permission is denied or GPS fails
- * (e.g. on an emulator with no location set).
+ * Device position. `coord` falls back to DEFAULT_CENTER until a real fix exists;
+ * check `hasFix` before using it for anything that matters (booking, going online).
  */
-export function useCurrentLocation() {
+export function useCurrentLocation({ watch = false }: Options = {}) {
   const [coord, setCoord] = useState<LngLat>(DEFAULT_CENTER);
-  const [granted, setGranted] = useState(false);
+  const [heading, setHeading] = useState<number | null>(null);
+  const [hasFix, setHasFix] = useState(false);
+  const [granted, setGranted] = useState<boolean | null>(null);
 
   useEffect(() => {
     let cancelled = false;
+    let sub: Location.LocationSubscription | null = null;
+
+    const apply = (pos: Location.LocationObject) => {
+      if (cancelled) return;
+      setCoord([pos.coords.longitude, pos.coords.latitude]);
+      const h = pos.coords.heading;
+      setHeading(typeof h === 'number' && h >= 0 ? h : null);
+      setHasFix(true);
+    };
+
     (async () => {
       try {
         const { status } = await Location.requestForegroundPermissionsAsync();
-        if (status !== 'granted' || cancelled) return;
-        setGranted(true);
-        const last = await Location.getLastKnownPositionAsync();
-        if (last && !cancelled) setCoord([last.coords.longitude, last.coords.latitude]);
-        const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-        if (!cancelled) setCoord([pos.coords.longitude, pos.coords.latitude]);
+        if (cancelled) return;
+        setGranted(status === 'granted');
+        if (status !== 'granted') return;
+        const last = await Location.getLastKnownPositionAsync().catch(() => null);
+        if (last) apply(last);
+        if (watch) {
+          const s = await Location.watchPositionAsync(
+            { accuracy: Location.Accuracy.High, timeInterval: 5000, distanceInterval: 10 },
+            apply
+          );
+          if (cancelled) s.remove();
+          else sub = s;
+        } else {
+          apply(await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }));
+        }
       } catch {
-        // keep fallback
+        // Keep the fallback; hasFix stays false.
       }
     })();
+
     return () => {
       cancelled = true;
+      sub?.remove();
     };
-  }, []);
+  }, [watch]);
 
-  return { coord, granted };
+  return { coord, heading, hasFix, granted };
 }

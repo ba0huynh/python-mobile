@@ -241,6 +241,8 @@ export function MapPin({ id: _id, coord, kind }: { id: string; coord: LngLat; ki
 }
 
 export type RouteLineProps = {
+  /** Unique per map (native parity; web derives ids from React). */
+  id?: string;
   from?: LngLat;
   to?: LngLat;
   coordinates?: LngLat[];
@@ -250,7 +252,7 @@ export type RouteLineProps = {
   color?: string;
 };
 
-export function RouteLine({ from, to, coordinates, geometry, color = Colors.primary }: RouteLineProps) {
+export function RouteLine({ id: _id, from, to, coordinates, geometry, color = Colors.primary }: RouteLineProps) {
   const map = useContext(MapContext);
   const reactId = useId();
   const sourceId = `src-${reactId.replace(/:/g, '')}`;

@@ -13,6 +13,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { OtpField } from '@/components/otp-field';
 import { Button, ui } from '@/components/ui';
 import { Colors, Radius, Spacing } from '@/constants/theme';
 import { api } from '@/lib/api';
@@ -26,7 +27,7 @@ export default function ForgotPasswordScreen() {
     params.role === 'driver' || contextRole === 'driver' ? 'driver' : 'customer'
   );
   const [phone, setPhone] = useState(params.phone || '');
-  const [otp, setOtp] = useState('1234');
+  const [otp, setOtp] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -39,6 +40,7 @@ export default function ForgotPasswordScreen() {
 
   const handleRoleChange = (nextRole: Role) => {
     setActiveRole(nextRole);
+    setOtp('');
     setError(null);
   };
 
@@ -47,8 +49,8 @@ export default function ForgotPasswordScreen() {
       setError('Vui lòng nhập số điện thoại.');
       return;
     }
-    if (!otp.trim()) {
-      setError('Vui lòng nhập mã OTP.');
+    if (!/^\d{6}$/.test(otp)) {
+      setError('Vui lòng nhập mã xác thực 6 số đã gửi tới điện thoại của bạn.');
       return;
     }
     if (!newPassword) {
@@ -162,7 +164,7 @@ export default function ForgotPasswordScreen() {
             </View>
             <Text style={ui.h1}>Quên mật khẩu</Text>
             <Text style={[ui.muted, { textAlign: 'center', paddingHorizontal: Spacing.md }]}>
-              Nhập số điện thoại tài khoản {isDriver ? 'Tài xế' : 'Khách hàng'} và mã OTP để đặt lại mật khẩu mới.
+              Nhập số điện thoại tài khoản {isDriver ? 'Tài xế' : 'Khách hàng'} rồi nhận mã xác thực qua SMS để đặt lại mật khẩu.
             </Text>
           </View>
 
@@ -201,35 +203,15 @@ export default function ForgotPasswordScreen() {
               </View>
             </View>
 
-            {/* OTP Code */}
-            <View style={styles.inputGroup}>
-              <View style={styles.labelRow}>
-                <Text style={styles.label}>Mã xác thực (OTP)</Text>
-                <Text style={[styles.badge, { color: roleColor, backgroundColor: roleBg }]}>
-                  Mặc định: 1234
-                </Text>
-              </View>
-              <View style={styles.inputWrap}>
-                <Ionicons
-                  name="shield-checkmark-outline"
-                  size={20}
-                  color={Colors.textSecondary}
-                  style={styles.inputIcon}
-                />
-                <TextInput
-                  placeholder="Nhập mã OTP (mặc định: 1234)"
-                  placeholderTextColor={Colors.textSecondary}
-                  value={otp}
-                  onChangeText={(text) => {
-                    setOtp(text);
-                    setError(null);
-                  }}
-                  keyboardType="number-pad"
-                  autoCapitalize="none"
-                  style={styles.input}
-                />
-              </View>
-            </View>
+            <OtpField
+              phone={phone}
+              purpose="reset_password"
+              role={activeRole}
+              value={otp}
+              onChange={setOtp}
+              color={roleColor}
+              onError={setError}
+            />
 
             {/* New Password */}
             <View style={styles.inputGroup}>

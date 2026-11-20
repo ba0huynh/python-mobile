@@ -64,6 +64,8 @@ export function MapPin({ id, coord, kind }: { id: string; coord: LngLat; kind: P
 }
 
 export type RouteLineProps = {
+  /** Unique per map: two lines with the same id would collide. */
+  id?: string;
   from?: LngLat;
   to?: LngLat;
   coordinates?: LngLat[];
@@ -74,7 +76,7 @@ export type RouteLineProps = {
 };
 
 /** Road route between points (GeoJSON LineString) or straight line fallback. */
-export function RouteLine({ from, to, coordinates, geometry, color = Colors.primary }: RouteLineProps) {
+export function RouteLine({ id = 'route', from, to, coordinates, geometry, color = Colors.primary }: RouteLineProps) {
   const coords = (geometry?.coordinates as LngLat[]) ?? coordinates ?? (from && to ? [from, to] : []);
   const isRealRoute = Boolean(geometry || (coordinates && coordinates.length > 2));
 
@@ -88,9 +90,9 @@ export function RouteLine({ from, to, coordinates, geometry, color = Colors.prim
   };
 
   return (
-    <GeoJSONSource id="route" data={feature}>
+    <GeoJSONSource id={id} data={feature}>
       <Layer
-        id="route-line"
+        id={`${id}-line`}
         type="line"
         layout={{ 'line-cap': 'round', 'line-join': 'round' }}
         paint={{

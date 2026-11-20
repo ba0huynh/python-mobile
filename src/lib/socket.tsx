@@ -1,8 +1,10 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 
-import { getApiBaseUrl } from './api';
+import { getApiBaseUrl, SessionExpiredError, type Offer, type RideData } from './api';
 import { useAuth } from './auth';
+import { formatVnd } from './format';
 import { useRole } from './role';
+import { vehicleInfo } from './vehicles';
 
 export type BannerType = 'info' | 'success' | 'warning' | 'driver';
 
@@ -22,22 +24,32 @@ type SocketContextType = {
   banner: BannerData | null;
   showBanner: (banner: Omit<BannerData, 'id'>) => void;
   dismissBanner: () => void;
+  /**
+   * Subscribe to a server event. The special event `connected` fires after every
+   * (re)connect: resync state over REST then, because events may have been missed.
+   */
   addListener: (event: string, callback: SocketListener) => () => void;
-  send: (payload: Record<string, unknown>) => void;
+  /** Returns false when the socket is not open (caller may fall back to REST). */
+  send: (payload: Record<string, unknown>) => boolean;
 };
 
 const SocketContext = createContext<SocketContextType | null>(null);
 
-function getWsUrl(token: string): string {
-  const httpUrl = getApiBaseUrl();
-  const wsBase = httpUrl.replace(/^http:\/\//, 'ws://').replace(/^https:\/\//, 'wss://');
-  return `${wsBase}/ws/?token=${encodeURIComponent(token)}`;
+const PING_MS = 25_000;
+const BACKOFF_MIN_MS = 1_000;
+const BACKOFF_MAX_MS = 30_000;
+const CLOSE_UNAUTHORIZED = 4401;
+
+function wsUrl(token: string): string {
+  const base = getApiBaseUrl().replace(/^http:\/\//, 'ws://').replace(/^https:\/\//, 'wss://');
+  return `${base}/ws/?token=${encodeURIComponent(token)}`;
 }
 
 export function SocketProvider({ children }: { children: ReactNode }) {
   const { role } = useRole();
-  const { customerToken, driverToken } = useAuth();
-  const activeToken = role === 'driver' ? driverToken : customerToken;
+  const { customer, driver, getValidToken, refreshToken } = useAuth();
+  const activeRole = role === 'driver' ? 'driver' : 'customer';
+  const signedIn = activeRole === 'driver' ? Boolean(driver) : Boolean(customer);
 
   const [connected, setConnected] = useState(false);
   const [banner, setBanner] = useState<BannerData | null>(null);
@@ -47,203 +59,172 @@ export function SocketProvider({ children }: { children: ReactNode }) {
   const bannerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const showBanner = (data: Omit<BannerData, 'id'>) => {
-    if (bannerTimerRef.current) {
-      clearTimeout(bannerTimerRef.current);
-    }
-    const id = Date.now().toString();
-    const duration = data.duration ?? 5000;
+    if (bannerTimerRef.current) clearTimeout(bannerTimerRef.current);
+    const id = `${Date.now()}-${Math.random()}`;
     setBanner({ ...data, id });
-
     bannerTimerRef.current = setTimeout(() => {
       setBanner((curr) => (curr?.id === id ? null : curr));
-    }, duration);
+    }, data.duration ?? 5000);
   };
 
   const dismissBanner = () => {
-    if (bannerTimerRef.current) {
-      clearTimeout(bannerTimerRef.current);
-    }
+    if (bannerTimerRef.current) clearTimeout(bannerTimerRef.current);
     setBanner(null);
   };
 
   const addListener = (event: string, callback: SocketListener) => {
-    if (!listenersRef.current.has(event)) {
-      listenersRef.current.set(event, new Set());
-    }
-    listenersRef.current.get(event)!.add(callback);
-
+    const map = listenersRef.current;
+    if (!map.has(event)) map.set(event, new Set());
+    map.get(event)!.add(callback);
     return () => {
-      listenersRef.current.get(event)?.delete(callback);
+      map.get(event)?.delete(callback);
     };
   };
 
   const send = (payload: Record<string, unknown>) => {
-    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
-      socketRef.current.send(JSON.stringify(payload));
+    const ws = socketRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(payload));
+      return true;
+    }
+    return false;
+  };
+
+  const emit = (event: string, data: unknown) => {
+    listenersRef.current.get(event)?.forEach((cb) => {
+      try {
+        cb(data);
+      } catch (err) {
+        console.error(`Socket listener for ${event} failed:`, err);
+      }
+    });
+  };
+
+  const bannerFor = (event: string, data: unknown) => {
+    if (event === 'ride.offer' && activeRole === 'driver') {
+      const offer = data as Offer;
+      showBanner({
+        title: 'Cuốc xe mới!',
+        message: `${vehicleInfo(offer.ride?.vehicle_type).name} · ${formatVnd(offer.ride?.fare ?? 0)} · cách ${Math.round(
+          offer.distance_to_pickup_m ?? 0
+        )} m`,
+        type: 'driver',
+        duration: 6000,
+      });
+      return;
+    }
+    if (event !== 'ride.updated') return;
+    const ride = data as RideData;
+    if (activeRole === 'customer') {
+      if (ride.status === 'ACCEPTED') {
+        showBanner({
+          title: 'Đã tìm thấy tài xế!',
+          message: `${ride.driver?.full_name ?? 'Tài xế'} đang đến điểm đón.`,
+          type: 'success',
+        });
+      } else if (ride.status === 'ARRIVED') {
+        showBanner({ title: 'Tài xế đã đến điểm đón', message: 'Vui lòng ra xe.', type: 'success', duration: 8000 });
+      } else if (ride.status === 'COMPLETED') {
+        showBanner({ title: 'Chuyến đi hoàn thành', message: `Vui lòng thanh toán ${formatVnd(ride.fare)} tiền mặt.`, type: 'success' });
+      } else if (ride.status === 'CANCELLED' && ride.cancelled_by !== 'customer') {
+        showBanner({
+          title: 'Chuyến đi đã bị hủy',
+          message: ride.cancel_reason || 'Chuyến xe đã kết thúc.',
+          type: 'warning',
+          duration: 8000,
+        });
+      }
+    } else if (ride.status === 'CANCELLED' && ride.cancelled_by === 'customer') {
+      showBanner({ title: 'Khách đã hủy chuyến', message: ride.cancel_reason || 'Chuyến xe đã kết thúc.', type: 'warning' });
     }
   };
 
+  // Latest handlers for the long-lived socket callbacks (avoids stale closures).
+  const handlersRef = useRef({ emit, bannerFor });
   useEffect(() => {
-    if (!activeToken) {
-      if (socketRef.current) {
-        socketRef.current.close();
-        socketRef.current = null;
+    handlersRef.current = { emit, bannerFor };
+  });
+
+  useEffect(() => {
+    if (!signedIn) return;
+
+    let cancelled = false;
+    let attempt = 0;
+    let forceRefresh = false;
+    let pingTimer: ReturnType<typeof setInterval> | null = null;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const scheduleReconnect = () => {
+      if (cancelled) return;
+      const delay = Math.min(BACKOFF_MAX_MS, BACKOFF_MIN_MS * 2 ** attempt) * (0.8 + Math.random() * 0.4);
+      attempt += 1;
+      retryTimer = setTimeout(connect, delay);
+    };
+
+    async function connect() {
+      if (cancelled) return;
+      let token: string;
+      try {
+        token = forceRefresh ? await refreshToken(activeRole) : await getValidToken(activeRole);
+        forceRefresh = false;
+      } catch (err) {
+        // Session gone: auth state change unmounts this effect. Otherwise (offline) retry.
+        if (!(err instanceof SessionExpiredError)) scheduleReconnect();
+        return;
       }
-      return;
-    }
+      if (cancelled) return;
 
-    let isCancelled = false;
-    let pingInterval: ReturnType<typeof setInterval> | null = null;
-    let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
-
-    const connect = () => {
-      if (isCancelled) return;
-
-      const wsUrl = getWsUrl(activeToken);
-      const ws = new WebSocket(wsUrl);
+      const ws = new WebSocket(wsUrl(token));
       socketRef.current = ws;
 
       ws.onopen = () => {
-        if (isCancelled) return;
+        if (cancelled) return;
+        attempt = 0;
         setConnected(true);
-        // Start heartbeat ping every 25s
-        pingInterval = setInterval(() => {
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'ping' }));
-          }
-        }, 25000);
+        pingTimer = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' }));
+        }, PING_MS);
       };
 
       ws.onmessage = (event) => {
+        let payload: { event?: string; data?: unknown };
         try {
-          const payload = JSON.parse(event.data);
-          const { event: eventName, data } = payload;
-          if (!eventName) return;
-
-          // Dispatch to custom registered listeners
-          const callbacks = listenersRef.current.get(eventName);
-          callbacks?.forEach((cb) => {
-            try {
-              cb(data);
-            } catch (err) {
-              console.error(`Error in socket listener for ${eventName}:`, err);
-            }
-          });
-
-          // Show in-app banner notifications for key ride events
-          if (eventName === 'ride.requested') {
-            const vehicleLabel =
-              data?.vehicle_type === 'bike'
-                ? 'GoBike'
-                : data?.vehicle_type === 'car7'
-                  ? 'GoCar 7 chỗ'
-                  : 'GoCar 4 chỗ';
-            const dist = data?.distance_to_pickup_m
-              ? ` · Cách ${Math.round(data.distance_to_pickup_m)}m`
-              : '';
-            showBanner({
-              title: 'Cuốc xe mới!',
-              message: `Khách đặt ${vehicleLabel}${dist}. Nhấn để xem và nhận chuyến.`,
-              type: 'driver',
-              duration: 8000,
-            });
-          } else if (eventName === 'ride.unavailable') {
-            showBanner({
-              title: 'Cuốc xe đã được nhận',
-              message: 'Chuyến xe đã được tài xế khác nhận hoặc đã hủy.',
-              type: 'warning',
-            });
-          } else if (eventName === 'ride.updated') {
-            const status = data?.status;
-            if (status === 'ACCEPTED') {
-              if (role === 'customer') {
-                showBanner({
-                  title: 'Tài xế đã nhận chuyến!',
-                  message: `${data.driver?.full_name || 'Tài xế'} đang di chuyển đến điểm đón của bạn.`,
-                  type: 'success',
-                });
-              } else {
-                showBanner({
-                  title: 'Nhận chuyến thành công',
-                  message: 'Hãy di chuyển đến điểm đón khách hàng.',
-                  type: 'driver',
-                });
-              }
-            } else if (status === 'ARRIVED') {
-              if (role === 'customer') {
-                showBanner({
-                  title: 'Tài xế đã đến điểm đón!',
-                  message: 'Tài xế GoXe đã có mặt tại điểm đón. Vui lòng ra xe.',
-                  type: 'success',
-                  duration: 8000,
-                });
-              }
-            } else if (status === 'IN_PROGRESS') {
-              showBanner({
-                title: 'Chuyến đi bắt đầu',
-                message: 'Chúc bạn có một chuyến đi an toàn cùng GoXe!',
-                type: 'info',
-              });
-            } else if (status === 'COMPLETED') {
-              showBanner({
-                title: 'Chuyến đi đã hoàn thành',
-                message:
-                  role === 'driver'
-                    ? `Thu nhập: ${Number(data?.fare || 0).toLocaleString('vi-VN')}đ`
-                    : 'Cảm ơn bạn đã đồng hành cùng GoXe!',
-                type: 'success',
-              });
-            } else if (status === 'CANCELLED') {
-              showBanner({
-                title: 'Chuyến đi đã bị hủy',
-                message: data?.cancellation_reason || 'Chuyến xe đã kết thúc.',
-                type: 'warning',
-              });
-            }
-          }
-        } catch (err) {
-          console.warn('Failed to parse WebSocket message:', err);
+          payload = JSON.parse(String(event.data));
+        } catch {
+          return;
         }
+        if (!payload.event || payload.event === 'pong') return;
+        handlersRef.current.emit(payload.event, payload.data);
+        handlersRef.current.bannerFor(payload.event, payload.data);
       };
 
-      ws.onerror = () => {
-        // Ignored; close handler will trigger reconnect
-      };
-
-      ws.onclose = () => {
+      ws.onclose = (event) => {
+        if (pingTimer) clearInterval(pingTimer);
+        pingTimer = null;
+        if (socketRef.current === ws) socketRef.current = null;
         setConnected(false);
-        if (pingInterval) clearInterval(pingInterval);
-        if (!isCancelled) {
-          // Reconnect with backoff
-          reconnectTimeout = setTimeout(connect, 3000);
-        }
+        if (cancelled) return;
+        if (event.code === CLOSE_UNAUTHORIZED) forceRefresh = true;
+        scheduleReconnect();
       };
-    };
+    }
 
     connect();
 
     return () => {
-      isCancelled = true;
-      if (pingInterval) clearInterval(pingInterval);
-      if (reconnectTimeout) clearTimeout(reconnectTimeout);
-      if (socketRef.current) {
-        socketRef.current.close();
-        socketRef.current = null;
-      }
+      cancelled = true;
+      if (pingTimer) clearInterval(pingTimer);
+      if (retryTimer) clearTimeout(retryTimer);
+      socketRef.current?.close();
+      socketRef.current = null;
       setConnected(false);
     };
-  }, [activeToken, role]);
+    // getValidToken/refreshToken only read refs; reconnect when the signed-in identity changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [signedIn, activeRole, activeRole === 'driver' ? driver?.id : customer?.id]);
 
   return (
-    <SocketContext.Provider
-      value={{
-        connected,
-        banner,
-        showBanner,
-        dismissBanner,
-        addListener,
-        send,
-      }}>
+    <SocketContext.Provider value={{ connected, banner, showBanner, dismissBanner, addListener, send }}>
       {children}
     </SocketContext.Provider>
   );
@@ -251,8 +232,6 @@ export function SocketProvider({ children }: { children: ReactNode }) {
 
 export function useSocket(): SocketContextType {
   const context = useContext(SocketContext);
-  if (!context) {
-    throw new Error('useSocket must be used within a SocketProvider');
-  }
+  if (!context) throw new Error('useSocket must be used within a SocketProvider');
   return context;
 }

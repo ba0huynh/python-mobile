@@ -13,6 +13,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { OtpField } from '@/components/otp-field';
 import { Button, ui } from '@/components/ui';
 import { Colors, Radius, Spacing } from '@/constants/theme';
 import { useAuth } from '@/lib/auth';
@@ -37,6 +38,7 @@ export default function RegisterScreen() {
 
   // Common fields
   const [phone, setPhone] = useState('');
+  const [otp, setOtp] = useState('');
   const [fullName, setFullName] = useState('');
   const [password, setPassword] = useState('');
   const [passwordConfirm, setPasswordConfirm] = useState('');
@@ -60,6 +62,7 @@ export default function RegisterScreen() {
 
   const handleRoleChange = (nextRole: Role) => {
     setActiveRole(nextRole);
+    setOtp('');
     setError(null);
   };
 
@@ -82,6 +85,11 @@ export default function RegisterScreen() {
     }
     if (password !== passwordConfirm) {
       setError('Mật khẩu xác nhận không khớp.');
+      return;
+    }
+
+    if (!/^\d{6}$/.test(otp)) {
+      setError('Vui lòng nhập mã xác thực 6 số đã gửi tới điện thoại của bạn.');
       return;
     }
 
@@ -110,6 +118,7 @@ export default function RegisterScreen() {
           vehicle_name: vehicleName.trim() || undefined,
           password,
           password_confirm: passwordConfirm,
+          otp,
         });
         await setRole('driver');
         router.replace('/driver');
@@ -120,6 +129,7 @@ export default function RegisterScreen() {
           email: email.trim() || undefined,
           password,
           password_confirm: passwordConfirm,
+          otp,
         });
         await setRole('customer');
         router.replace('/customer');
@@ -244,6 +254,16 @@ export default function RegisterScreen() {
                 />
               </View>
             </View>
+
+            <OtpField
+              phone={phone}
+              purpose="register"
+              role={activeRole}
+              value={otp}
+              onChange={setOtp}
+              color={roleColor}
+              onError={setError}
+            />
 
             {/* Full Name */}
             <View style={styles.inputGroup}>

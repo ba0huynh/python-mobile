@@ -100,8 +100,9 @@ export function AccountScreen() {
                 <Row
                   icon="shield-checkmark-outline"
                   title="Trạng thái duyệt"
-                  subtitle={driver.is_approved ? 'Đã duyệt' : 'Chờ duyệt'}
+                  subtitle={driver.is_approved ? 'Đã duyệt' : 'Chờ duyệt hồ sơ'}
                 />
+                <Row icon="star-outline" title="Đánh giá" subtitle={`★ ${Number(driver.rating ?? 5).toFixed(1)}`} />
               </>
             ) : (
               <>
@@ -110,14 +111,8 @@ export function AccountScreen() {
                   title="Phương thức thanh toán"
                   subtitle="Tiền mặt"
                 />
-                <Row
-                  icon="bookmark-outline"
-                  title="Địa điểm đã lưu"
-                  subtitle="Nhà riêng, Cơ quan"
-                />
               </>
             )}
-            <Row icon="help-circle-outline" title="Trợ giúp & Hỗ trợ" />
           </View>
         )}
 
