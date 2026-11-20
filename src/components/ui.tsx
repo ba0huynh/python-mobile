@@ -10,6 +10,7 @@ import {
   type ViewStyle,
 } from 'react-native';
 
+import { useKeyboardHeight } from '@/components/keyboard';
 import { Colors, Radius, Spacing } from '@/constants/theme';
 
 type ButtonProps = {
@@ -45,8 +46,10 @@ export function Button({ title, onPress, variant = 'primary', loading, disabled,
 
 /** White card pinned to the bottom of a map screen. */
 export function BottomCard({ children }: { children: ReactNode }) {
+  // Sit above the keyboard (e.g. destination search) instead of being covered by it.
+  const keyboardHeight = useKeyboardHeight();
   return (
-    <View style={styles.bottomCard}>
+    <View style={[styles.bottomCard, keyboardHeight > 0 && { bottom: keyboardHeight }]}>
       <View style={styles.handle} />
       {children}
     </View>

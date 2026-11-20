@@ -2,10 +2,8 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useState } from 'react';
 import {
-  KeyboardAvoidingView,
   Platform,
   Pressable,
-  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -14,6 +12,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { OtpField } from '@/components/otp-field';
+import { KeyboardScreen } from '@/components/keyboard';
 import { Button, ui } from '@/components/ui';
 import { Colors, Radius, Spacing } from '@/constants/theme';
 import { api } from '@/lib/api';
@@ -95,10 +94,7 @@ export default function ForgotPasswordScreen() {
 
   return (
     <SafeAreaView style={ui.screen}>
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        style={{ flex: 1 }}>
-        <ScrollView contentContainerStyle={styles.scroll}>
+      <KeyboardScreen contentContainerStyle={styles.scroll}>
           {/* Top Bar */}
           <View style={styles.topBar}>
             <Pressable
@@ -297,8 +293,7 @@ export default function ForgotPasswordScreen() {
               </Text>
             </Pressable>
           </View>
-        </ScrollView>
-      </KeyboardAvoidingView>
+        </KeyboardScreen>
     </SafeAreaView>
   );
 }
