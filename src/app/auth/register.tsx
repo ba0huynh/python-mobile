@@ -44,7 +44,6 @@ export default function RegisterScreen() {
   const [showPassword, setShowPassword] = useState(false);
 
   // Customer field
-  const [email, setEmail] = useState('');
 
   // Driver fields
   const [licenseNumber, setLicenseNumber] = useState('');
@@ -125,7 +124,6 @@ export default function RegisterScreen() {
         await registerCustomer({
           phone: phone.trim(),
           full_name: fullName.trim(),
-          email: email.trim() || undefined,
           password,
           password_confirm: passwordConfirm,
           otp,
@@ -284,33 +282,6 @@ export default function RegisterScreen() {
                 />
               </View>
             </View>
-
-            {/* Customer only: Email */}
-            {!isDriver && (
-              <View style={styles.inputGroup}>
-                <Text style={styles.label}>Email (không bắt buộc)</Text>
-                <View style={styles.inputWrap}>
-                  <Ionicons
-                    name="mail-outline"
-                    size={20}
-                    color={Colors.textSecondary}
-                    style={styles.inputIcon}
-                  />
-                  <TextInput
-                    placeholder="VD: an@example.com"
-                    placeholderTextColor={Colors.textSecondary}
-                    value={email}
-                    onChangeText={(text) => {
-                      setEmail(text);
-                      setError(null);
-                    }}
-                    keyboardType="email-address"
-                    autoCapitalize="none"
-                    style={styles.input}
-                  />
-                </View>
-              </View>
-            )}
 
             {/* Driver only: Vehicle & License info */}
             {isDriver && (
